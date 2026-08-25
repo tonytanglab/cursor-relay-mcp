@@ -1,0 +1,64 @@
+{
+  "name": "cursor-relay-mcp",
+  "version": "0.1.0",
+  "description": "Delegate durable, model-selected coding tasks to Cursor Agent through MCP.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "cursor-relay-mcp": "./dist/index.js"
+  },
+  "files": [
+    ".codex-plugin/plugin.json",
+    ".mcp.json",
+    "dist/",
+    "skills/",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "version.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "node ./scripts/clean.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:sdk-contract": "node --import tsx --test tests/sdk-contract.test.ts",
+    "test:mcp": "npm run build && node ./scripts/mcp-smoke.mjs",
+    "check:package": "node ./scripts/validate-package.mjs",
+    "prepack": "npm run clean && npm run build && npm run check:package"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@cursor/sdk": "1.0.28",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.35.0",
+    "@types/node": "24.13.3",
+    "eslint": "9.35.0",
+    "prettier": "3.6.2",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.42.0"
+  },
+  "keywords": [
+    "cursor",
+    "cursor-sdk",
+    "mcp",
+    "agent",
+    "delegation",
+    "codex-plugin"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

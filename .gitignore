@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.npm-cache/
+.env
+.env.*
+!.env.example
+.cursor-relay-state/
+*.tgz
+*.log
