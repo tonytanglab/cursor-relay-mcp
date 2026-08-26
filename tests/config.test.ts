@@ -61,9 +61,22 @@ test("config does not infer workspace roots", () => {
   assert.deepEqual(config.workspaceRoots, []);
   assert.equal(config.defaultTimeoutMs, 1234);
   assert.equal(config.dangerFullAccessEnabled, false);
-  assert.equal(config.readOnlySandboxEnabled, true);
+  assert.equal(config.readOnlySandboxEnabled, process.platform !== "win32");
   assert.equal(config.environmentApiKeyConfigured, false);
   assert.deepEqual(config.settingSources, ["project"]);
+});
+
+test("read-only sandbox is clamped off on Windows and configurable elsewhere", () => {
+  assert.equal(
+    loadConfig({ CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED: "true" })
+      .readOnlySandboxEnabled,
+    process.platform !== "win32",
+  );
+  assert.equal(
+    loadConfig({ CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED: "false" })
+      .readOnlySandboxEnabled,
+    false,
+  );
 });
 
 test("blank API key is missing and normalized so stored login can be used", () => {

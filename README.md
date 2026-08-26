@@ -4,6 +4,8 @@ A local MCP server built on the official `@cursor/sdk`. It lets MCP clients dele
 
 `@cursor/sdk` is public beta. This package pins exactly `1.0.28` and includes an SDK export contract test. See [README.zh-CN.md](./README.zh-CN.md) for the full guide.
 
+For a tested Codex Desktop installation workflow on Windows, including personal marketplace layout, CLI fallback, sandbox compatibility, cache refresh, and a Grok 4.6 smoke test, see [CODEX_INSTALL.zh-CN.md](./CODEX_INSTALL.zh-CN.md).
+
 ## Quick start
 
 Requirements: Git, Node.js `>=22.13`, and a Cursor account. The recommended
@@ -44,17 +46,21 @@ allowlist. When a user explicitly authorizes Cursor Relay for a workspace in the
 current conversation, `authorize_workspace` can issue a five-minute, single-use,
 exact-task capability for `read-only` only. The token is never persisted and is
 bound to the real path, task, idempotency key, and MCP task/session when available.
-Permissions otherwise default to read-only, the Cursor sandbox is enabled, and
-only project settings are loaded. `workspace-write` still requires the static
+Permissions otherwise default to read-only, the Cursor sandbox is enabled by
+default on supported non-Windows hosts, and only project settings are loaded.
+Windows defaults the SDK sandbox off because the current local runtime reports
+it as unsupported; the read-only tool allowlist remains enforced.
+`workspace-write` still requires the static
 allowlist. `danger-full-access` requires both
 `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true` at server startup and
 `confirmedDangerousPermission=true` on the request. Leave the server switch off
 for normal use.
 
-If the official SDK reports that local sandboxing is unsupported, an operator
-may set `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED=false`. This exception applies
-only to the `read-only` preset; its public tool allowlist remains restricted to
-`read`, `grep`, `glob`, and `ls`. The default stays `true`, and
+`CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED` can explicitly disable the sandbox on
+supported non-Windows hosts. Windows always clamps this setting off because the
+current Cursor SDK local runtime does not support that sandbox path. This switch
+applies only to the `read-only` preset; its public tool allowlist remains
+restricted to `read`, `grep`, `glob`, and `ls`.
 `workspace-write` still requires SDK sandbox support.
 
 `CURSOR_RELAY_SETTING_SOURCES` is an optional comma-separated list restricted

@@ -56,11 +56,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
       env.CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS,
       false,
     ),
-    readOnlySandboxEnabled: strictBoolean(
-      "CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED",
-      env.CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED,
-      true,
-    ),
+    readOnlySandboxEnabled:
+      strictBoolean(
+        "CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED",
+        env.CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED,
+        true,
+      ) && process.platform !== "win32",
     settingSources: parseSettingSources(env.CURSOR_RELAY_SETTING_SOURCES),
   };
 }

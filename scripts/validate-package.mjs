@@ -9,6 +9,7 @@ const required = [
   "skills/delegate-to-cursor-agent/SKILL.md",
   "README.md",
   "README.zh-CN.md",
+  "CODEX_INSTALL.zh-CN.md",
   "LICENSE",
 ];
 await Promise.all(required.map((path) => access(resolve(path))));

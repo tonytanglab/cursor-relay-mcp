@@ -11,10 +11,12 @@
 - Relay 状态采用原子 UTF-8 JSON，Cursor SDK 状态采用官方 `JsonlLocalAgentStore`；进程重启后可通过 `Agent.getRun` 重连。
 - `wait_run` 每次最多等待 30 秒，未结束时明确返回 `mustCallAgain=true`。
 - 总运行超时、取消、有限事件缓冲、8 KiB 单事件上限、敏感字段名脱敏以及统一结构化错误。
-- 安全默认值：无人值守运行必须命中静态工作区白名单；当前对话明确授权时可签发短时一次性只读 capability；默认只读、Cursor 沙箱启用、只加载项目设置。
+- 安全默认值：无人值守运行必须命中静态工作区白名单；当前对话明确授权时可签发短时一次性只读 capability；默认只读并只加载项目设置；支持的非 Windows 主机默认启用 Cursor 沙箱，Windows 因当前 SDK 本地运行时不支持而默认关闭沙箱，但仍强制只读工具白名单。
 - SDK Agent 句柄在运行终态后释放；模型、requestId、耗时和 token usage 使用官方公开结果字段持久化。
 
 ## 要求与安装
+
+需要在 Codex Windows 桌面版中完成 personal marketplace 注册、缓存安装和真实模型验收时，请直接使用 [Codex Windows 快速安装与避坑手册](./CODEX_INSTALL.zh-CN.md)。该手册包含正确目录布局、WindowsApps CLI 备用路径、Cursor stored login、SDK sandbox 兼容、缓存重装和 Grok 4.6 冒烟测试流程。
 
 - Git、Node.js `>=22.13`
 - 可登录的 Cursor 账户
@@ -44,17 +46,17 @@ node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.l
 
 可选环境变量：
 
-| 变量                                     | 默认值                | 说明                                                                              |
-| ---------------------------------------- | --------------------- | --------------------------------------------------------------------------------- |
-| `CURSOR_API_KEY`                         | 无                    | 可选环境 Key；未设置时使用官方 stored login                                       |
-| `CURSOR_RELAY_WORKSPACE_ROOTS`           | 空                    | `path.delimiter` 分隔的无人值守允许根目录；为空时仍可使用当前对话的一次性只读授权 |
-| `CURSOR_RELAY_STATE_DIR`                 | `~/.cursor-relay-mcp` | Relay 与 Cursor SDK 持久状态目录                                                  |
-| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`        | `1800000`             | 默认总运行超时                                                                    |
-| `CURSOR_RELAY_MAX_TIMEOUT_MS`            | `14400000`            | 允许的最大总超时                                                                  |
-| `CURSOR_RELAY_MAX_EVENTS`                | `1000`                | 每个运行保留的最大事件数                                                          |
-| `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS` | `false`               | 服务端危险权限总开关；仅接受严格的 `true`/`false`                                 |
-| `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED` | `true`                | 只读预设是否启用 SDK 沙箱；不支持沙箱时可显式关闭                                 |
-| `CURSOR_RELAY_SETTING_SOURCES`           | `project`             | 逗号分隔的设置层，仅允许 `project`、`team`、`mdm`                                 |
+| 变量                                     | 默认值                | 说明                                                                                                   |
+| ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
+| `CURSOR_API_KEY`                         | 无                    | 可选环境 Key；未设置时使用官方 stored login                                                            |
+| `CURSOR_RELAY_WORKSPACE_ROOTS`           | 空                    | `path.delimiter` 分隔的无人值守允许根目录；为空时仍可使用当前对话的一次性只读授权                      |
+| `CURSOR_RELAY_STATE_DIR`                 | `~/.cursor-relay-mcp` | Relay 与 Cursor SDK 持久状态目录                                                                       |
+| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`        | `1800000`             | 默认总运行超时                                                                                         |
+| `CURSOR_RELAY_MAX_TIMEOUT_MS`            | `14400000`            | 允许的最大总超时                                                                                       |
+| `CURSOR_RELAY_MAX_EVENTS`                | `1000`                | 每个运行保留的最大事件数                                                                               |
+| `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS` | `false`               | 服务端危险权限总开关；仅接受严格的 `true`/`false`                                                      |
+| `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED` | 平台自适应            | 只读预设是否启用 SDK 沙箱；Windows 因当前 SDK 不兼容而强制为 `false`，其他平台默认 `true` 且可显式关闭 |
+| `CURSOR_RELAY_SETTING_SOURCES`           | `project`             | 逗号分隔的设置层，仅允许 `project`、`team`、`mdm`                                                      |
 
 所有已设置的数字和布尔配置必须合法，否则服务启动失败；不会静默回退。默认超时不能大于最大超时。
 
@@ -99,7 +101,7 @@ node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.l
 
 ### 权限预设
 
-- `read-only`（默认）：只开放 `read`、`grep`、`glob`、`ls`，Auto-review 开启，沙箱默认开启。若官方 SDK 明确报告当前环境不支持本地沙箱，可由服务启动环境设置 `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED=false`；工具白名单保持不变。
+- `read-only`（默认）：只开放 `read`、`grep`、`glob`、`ls`，Auto-review 开启。支持的非 Windows 主机默认启用沙箱并可显式关闭；Windows 因当前 Cursor SDK 本地运行时不支持而强制关闭，避免遗留环境变量重新进入不兼容路径。工具白名单始终保持不变。
 - `workspace-write`：沙箱和 Auto-review 开启，并禁止删除、子代理、MCP、联网和图片生成能力。
 - `danger-full-access`：关闭沙箱和 Auto-review；必须由服务启动环境显式设置 `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true`，请求还必须传 `confirmedDangerousPermission=true`。默认关闭。
 
