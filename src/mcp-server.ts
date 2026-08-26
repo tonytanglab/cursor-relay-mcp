@@ -41,6 +41,24 @@ export function createMcpServer(service: RelayService): McpServer {
   );
 
   server.registerTool(
+    "authorize_workspace",
+    {
+      description:
+        "仅当用户在当前对话明确要求 Cursor Relay 使用该工作区时调用。为一个精确任务和幂等键签发五分钟有效、一次性、只读的工作区授权；不授予写入或危险权限。",
+      inputSchema: {
+        workspace: z.string().min(1),
+        task: z.string().min(1),
+        permission: z.literal("read-only").optional(),
+        idempotencyKey: z.string().min(8).max(200),
+      },
+      annotations: approvalAnnotations(),
+    },
+    guarded(async (input, extra) =>
+      service.authorizeWorkspaceOnce(input, callerScope(extra)),
+    ),
+  );
+
+  server.registerTool(
     "start_run",
     {
       description:
@@ -51,12 +69,15 @@ export function createMcpServer(service: RelayService): McpServer {
         model: modelSchema,
         permission: permissionSchema.optional(),
         confirmedDangerousPermission: z.boolean().optional(),
+        workspaceApprovalToken: z.string().min(32).max(200).optional(),
         idempotencyKey: z.string().min(8).max(200),
         timeoutMs: z.number().int().optional(),
       },
       annotations: mutatingAnnotations(true),
     },
-    guarded(async (input) => service.startRun(input)),
+    guarded(async (input, extra) =>
+      service.startRun(input, callerScope(extra)),
+    ),
   );
 
   server.registerTool(
@@ -70,12 +91,15 @@ export function createMcpServer(service: RelayService): McpServer {
         model: modelSchema.optional(),
         permission: permissionSchema.optional(),
         confirmedDangerousPermission: z.boolean().optional(),
+        workspaceApprovalToken: z.string().min(32).max(200).optional(),
         idempotencyKey: z.string().min(8).max(200),
         timeoutMs: z.number().int().optional(),
       },
       annotations: mutatingAnnotations(true),
     },
-    guarded(async (input) => service.replyRun(input)),
+    guarded(async (input, extra) =>
+      service.replyRun(input, callerScope(extra)),
+    ),
   );
 
   server.registerTool(
@@ -165,12 +189,32 @@ function mutatingAnnotations(openWorldHint: boolean) {
   };
 }
 
+function approvalAnnotations() {
+  return {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  };
+}
+
+interface ToolContext {
+  sessionId?: string;
+  taskId?: string;
+}
+
+function callerScope(extra: ToolContext): string {
+  if (extra.taskId) return `task:${extra.taskId}`;
+  if (extra.sessionId) return `session:${extra.sessionId}`;
+  return "stdio-process";
+}
+
 function guarded<TInput extends Record<string, unknown>>(
-  handler: (input: TInput) => unknown,
+  handler: (input: TInput, extra: ToolContext) => unknown,
 ) {
-  return async (input: TInput) => {
+  return async (input: TInput, extra: ToolContext) => {
     try {
-      const data = await handler(input);
+      const data = await handler(input, extra);
       const structuredContent = { ok: true, data } as Record<string, unknown>;
       return {
         content: [

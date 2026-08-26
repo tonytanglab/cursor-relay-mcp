@@ -115,6 +115,13 @@ const relayRun = z.object({
   task: z.string().min(1),
   model: modelSelection,
   permission: z.enum(["read-only", "workspace-write", "danger-full-access"]),
+  workspaceAuthorization: z
+    .object({
+      source: z.enum(["static-allowlist", "interactive-once"]),
+      approvalId: z.string().min(1).optional(),
+      authorizedAt: isoDate.optional(),
+    })
+    .optional(),
   dangerousPermissionConfirmed: z.boolean().optional(),
   status: z.enum(["starting", "running", "succeeded", "failed", "cancelled"]),
   createdAt: isoDate,

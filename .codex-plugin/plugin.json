@@ -15,7 +15,8 @@
     "capabilities": [
       "Cursor model discovery",
       "Durable local agent runs",
-      "Restart-safe polling"
+      "Restart-safe polling",
+      "Conversation-scoped read-only workspace approval"
     ],
     "defaultPrompt": [
       "Use Cursor Relay to delegate this task with an explicit model and read-only permissions by default."

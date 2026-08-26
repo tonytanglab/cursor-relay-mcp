@@ -39,9 +39,14 @@ history, logs, or the repository. When using stored login, omit
 
 The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
 
-Security defaults are fail-closed: an empty workspace allowlist denies all
-runs, permissions default to read-only, the Cursor sandbox is enabled, and only
-project settings are loaded. `danger-full-access` requires both
+Security defaults are fail-closed: unattended runs require the static workspace
+allowlist. When a user explicitly authorizes Cursor Relay for a workspace in the
+current conversation, `authorize_workspace` can issue a five-minute, single-use,
+exact-task capability for `read-only` only. The token is never persisted and is
+bound to the real path, task, idempotency key, and MCP task/session when available.
+Permissions otherwise default to read-only, the Cursor sandbox is enabled, and
+only project settings are loaded. `workspace-write` still requires the static
+allowlist. `danger-full-access` requires both
 `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true` at server startup and
 `confirmedDangerousPermission=true` on the request. Leave the server switch off
 for normal use.

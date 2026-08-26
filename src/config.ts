@@ -121,22 +121,33 @@ export async function authorizeWorkspace(
   workspace: string,
   roots: string[],
 ): Promise<string> {
-  if (!isAbsolute(workspace))
-    throw new RelayError("WORKSPACE_NOT_ABSOLUTE", "workspace 必须是绝对路径");
+  const actual = await resolveWorkspace(workspace);
+  if (await workspaceIsWithinRoots(actual, roots)) return actual;
   if (roots.length === 0) {
     throw new RelayError(
       "WORKSPACE_DENIED",
-      "未配置 CURSOR_RELAY_WORKSPACE_ROOTS；默认拒绝所有工作区",
+      "未配置 CURSOR_RELAY_WORKSPACE_ROOTS；默认拒绝无人值守工作区",
     );
   }
-  let actual: string;
+  throw new RelayError("WORKSPACE_DENIED", `工作区不在允许根目录内：${actual}`);
+}
+
+export async function resolveWorkspace(workspace: string): Promise<string> {
+  if (!isAbsolute(workspace))
+    throw new RelayError("WORKSPACE_NOT_ABSOLUTE", "workspace 必须是绝对路径");
   try {
-    actual = await realpath(workspace);
+    return await realpath(workspace);
   } catch (cause) {
     throw new RelayError("WORKSPACE_NOT_FOUND", `工作区不存在：${workspace}`, {
       cause,
     });
   }
+}
+
+export async function workspaceIsWithinRoots(
+  actualWorkspace: string,
+  roots: string[],
+): Promise<boolean> {
   for (const root of roots) {
     let actualRoot: string;
     try {
@@ -145,13 +156,15 @@ export async function authorizeWorkspace(
       continue;
     }
     const candidate =
-      process.platform === "win32" ? actual.toLowerCase() : actual;
+      process.platform === "win32"
+        ? actualWorkspace.toLowerCase()
+        : actualWorkspace;
     const allowed =
       process.platform === "win32" ? actualRoot.toLowerCase() : actualRoot;
     if (candidate === allowed || candidate.startsWith(`${allowed}${sep}`))
-      return actual;
+      return true;
   }
-  throw new RelayError("WORKSPACE_DENIED", `工作区不在允许根目录内：${actual}`);
+  return false;
 }
 
 export function permissionOptions(

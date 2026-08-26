@@ -231,6 +231,125 @@ test("model validation, permission mapping, idempotency and wait contract", asyn
   }
 });
 
+test("explicit conversation approval grants one exact read-only run outside static roots", async () => {
+  const item = await fixture();
+  const outside = await mkdtemp(join(tmpdir(), "cursor-relay-approved-"));
+  const task = "评估 PackCAD CLI/MCP";
+  const idempotencyKey = "packcad-readonly-review";
+  const callerScope = "task:current-conversation";
+  try {
+    await assert.rejects(
+      item.service.startRun(
+        {
+          workspace: outside,
+          task,
+          model: { id: "cursor-test" },
+          idempotencyKey,
+        },
+        callerScope,
+      ),
+      (error: unknown) =>
+        error instanceof RelayError &&
+        error.code === "WORKSPACE_APPROVAL_REQUIRED",
+    );
+    await assert.rejects(
+      item.service.authorizeWorkspaceOnce(
+        {
+          workspace: outside,
+          task,
+          idempotencyKey,
+          permission: "workspace-write",
+        },
+        callerScope,
+      ),
+      (error: unknown) =>
+        error instanceof RelayError &&
+        error.code === "WORKSPACE_APPROVAL_PERMISSION_DENIED",
+    );
+
+    const grant = await item.service.authorizeWorkspaceOnce(
+      { workspace: outside, task, idempotencyKey },
+      callerScope,
+    );
+    assert.equal(grant.authorizationRequired, true);
+    assert.equal(grant.source, "interactive-once");
+    assert.ok("token" in grant && grant.token);
+
+    await assert.rejects(
+      item.service.startRun(
+        {
+          workspace: outside,
+          task,
+          model: { id: "cursor-test" },
+          idempotencyKey,
+          workspaceApprovalToken: "token" in grant ? grant.token : undefined,
+        },
+        "task:different-conversation",
+      ),
+      (error: unknown) =>
+        error instanceof RelayError &&
+        error.code === "WORKSPACE_APPROVAL_MISMATCH",
+    );
+    await assert.rejects(
+      item.service.startRun(
+        {
+          workspace: outside,
+          task,
+          model: { id: "cursor-test" },
+          idempotencyKey,
+          permission: "workspace-write",
+          workspaceApprovalToken: "token" in grant ? grant.token : undefined,
+        },
+        callerScope,
+      ),
+      (error: unknown) =>
+        error instanceof RelayError && error.code === "WORKSPACE_DENIED",
+    );
+
+    const started = await item.service.startRun(
+      {
+        workspace: outside,
+        task,
+        model: { id: "cursor-test" },
+        idempotencyKey,
+        workspaceApprovalToken: "token" in grant ? grant.token : undefined,
+      },
+      callerScope,
+    );
+    const authorization = started.run.workspaceAuthorization;
+    assert.ok(authorization);
+    assert.equal(authorization.source, "interactive-once");
+    assert.equal(
+      authorization.approvalId,
+      "approvalId" in grant ? grant.approvalId : undefined,
+    );
+    assert.equal(
+      JSON.stringify(await item.store.read()).includes(
+        "token" in grant ? grant.token : "impossible",
+      ),
+      false,
+    );
+
+    const replay = await item.service.startRun(
+      {
+        workspace: outside,
+        task,
+        model: { id: "cursor-test" },
+        idempotencyKey,
+      },
+      callerScope,
+    );
+    assert.equal(replay.idempotentReplay, true);
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "reviewed" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test("a new service instance reconnects a persisted SDK run", async () => {
   const item = await fixture();
   try {

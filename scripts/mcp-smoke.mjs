@@ -18,9 +18,14 @@ try {
   if (!tools.tools.some((tool) => tool.name === "wait_run"))
     throw new Error("wait_run missing");
   const doctorTool = tools.tools.find((tool) => tool.name === "doctor");
+  const authorizeTool = tools.tools.find(
+    (tool) => tool.name === "authorize_workspace",
+  );
   const startTool = tools.tools.find((tool) => tool.name === "start_run");
   if (
     doctorTool?.annotations?.readOnlyHint !== true ||
+    authorizeTool?.annotations?.readOnlyHint !== false ||
+    authorizeTool.annotations.destructiveHint !== false ||
     startTool?.annotations?.destructiveHint !== true ||
     startTool.annotations.idempotentHint !== true
   )
@@ -30,6 +35,23 @@ try {
   const structured = result.structuredContent;
   if (!structured || typeof structured.ok !== "boolean")
     throw new Error("doctor structured output missing");
+  const approval = await client.callTool({
+    name: "authorize_workspace",
+    arguments: {
+      workspace: stateDir,
+      task: "MCP smoke read-only authorization",
+      idempotencyKey: "mcp-smoke-approval",
+    },
+  });
+  if (approval.isError) throw new Error("authorize_workspace returned error");
+  const approvalData = approval.structuredContent?.data;
+  if (
+    typeof approvalData !== "object" ||
+    approvalData === null ||
+    !("token" in approvalData) ||
+    typeof approvalData.token !== "string"
+  )
+    throw new Error("authorize_workspace capability missing");
   process.stdout.write(`MCP smoke passed (${tools.tools.length} tools)\n`);
 } finally {
   await client.close();

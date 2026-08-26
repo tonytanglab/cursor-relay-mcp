@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { RelayError, asRelayError } from "./errors.js";
 import {
-  authorizeWorkspace,
   permissionOptions,
+  resolveWorkspace,
+  workspaceIsWithinRoots,
   type RelayConfig,
 } from "./config.js";
 import {
@@ -15,7 +16,9 @@ import {
   type CursorSdkPort,
 } from "./sdk-port.js";
 import { StateStore } from "./state-store.js";
+import { WorkspaceApprovalBroker } from "./workspace-approval.js";
 import type {
+  AuthorizeWorkspaceInput,
   ModelSelection,
   RelayRun,
   RelayRunSummary,
@@ -39,6 +42,7 @@ export class RelayService {
     private readonly config: RelayConfig,
     private readonly store: StateStore,
     private readonly sdk: CursorSdkPort,
+    private readonly workspaceApprovals = new WorkspaceApprovalBroker(),
   ) {}
 
   async doctor() {
@@ -67,14 +71,59 @@ export class RelayService {
     return { models: await this.getModels() };
   }
 
+  async authorizeWorkspaceOnce(
+    input: AuthorizeWorkspaceInput,
+    callerScope = "stdio-process",
+  ) {
+    const workspace = await resolveWorkspace(input.workspace);
+    const permission = input.permission ?? "read-only";
+    if (permission !== "read-only") {
+      throw new RelayError(
+        "WORKSPACE_APPROVAL_PERMISSION_DENIED",
+        "当前对话的一次性工作区授权仅允许 read-only；写权限仍须静态白名单",
+      );
+    }
+    if (await workspaceIsWithinRoots(workspace, this.config.workspaceRoots)) {
+      return {
+        authorizationRequired: false,
+        workspace,
+        permission,
+        source: "static-allowlist" as const,
+      };
+    }
+    const grant = this.workspaceApprovals.issue({
+      workspace,
+      task: input.task,
+      idempotencyKey: input.idempotencyKey,
+      callerScope,
+    });
+    return {
+      authorizationRequired: true,
+      workspace,
+      permission,
+      source: "interactive-once" as const,
+      ...grant,
+      instruction:
+        "立即用相同 workspace、task、idempotencyKey 和 read-only 调用 start_run，并传入 workspaceApprovalToken；令牌只显示一次。",
+    };
+  }
+
   async startRun(
     input: StartRunInput,
+    callerScope = "stdio-process",
   ): Promise<{ run: RelayRunSummary; idempotentReplay: boolean }> {
-    const workspace = await authorizeWorkspace(
-      input.workspace,
+    const workspace = await resolveWorkspace(input.workspace);
+    const staticallyAllowed = await workspaceIsWithinRoots(
+      workspace,
       this.config.workspaceRoots,
     );
     const permission = input.permission ?? "read-only";
+    if (!staticallyAllowed && permission !== "read-only") {
+      throw new RelayError(
+        "WORKSPACE_DENIED",
+        "工作区不在静态白名单内；当前对话授权不能授予 workspace-write 或 danger-full-access",
+      );
+    }
     permissionOptions(
       permission,
       input.confirmedDangerousPermission,
@@ -116,6 +165,19 @@ export class RelayService {
       };
     }
 
+    const approvalRequest = {
+      workspace,
+      task: input.task,
+      idempotencyKey: input.idempotencyKey,
+      callerScope,
+    };
+    const approval = staticallyAllowed
+      ? undefined
+      : this.workspaceApprovals.validate(
+          input.workspaceApprovalToken,
+          approvalRequest,
+        );
+
     const now = new Date();
     const relayRunId = stableId("crun", input.idempotencyKey);
     const agentId = input.parentRunId
@@ -128,6 +190,13 @@ export class RelayService {
       task: input.task,
       model,
       permission,
+      workspaceAuthorization: staticallyAllowed
+        ? { source: "static-allowlist" }
+        : {
+            source: "interactive-once",
+            approvalId: approval?.approvalId,
+            authorizedAt: approval?.authorizedAt,
+          },
       ...(permission === "danger-full-access"
         ? { dangerousPermissionConfirmed: true }
         : {}),
@@ -156,6 +225,16 @@ export class RelayService {
       state.operations[input.idempotencyKey] = { fingerprint, relayRunId };
       return { created: true as const, relayRunId };
     });
+    if (
+      reservation.created &&
+      approval &&
+      input.workspaceApprovalToken !== undefined
+    ) {
+      this.workspaceApprovals.consume(
+        input.workspaceApprovalToken,
+        approval.approvalId,
+      );
+    }
     if (!reservation.created) {
       const racedRun = await this.requireRun(reservation.relayRunId);
       await this.ensureAttached(
@@ -183,16 +262,20 @@ export class RelayService {
       parentRunId: string;
       model?: ModelSelection | undefined;
     },
+    callerScope = "stdio-process",
   ) {
     const parent = await this.requireRun(input.parentRunId);
     if (!TERMINAL.has(parent.status))
       throw new RelayError("PARENT_NOT_TERMINAL", "只能续接已结束的运行");
-    return await this.startRun({
-      ...input,
-      workspace: parent.workspace,
-      model: input.model ?? parent.model,
-      permission: input.permission ?? parent.permission,
-    });
+    return await this.startRun(
+      {
+        ...input,
+        workspace: parent.workspace,
+        model: input.model ?? parent.model,
+        permission: input.permission ?? parent.permission,
+      },
+      callerScope,
+    );
   }
 
   async getRun(relayRunId: string): Promise<RelayRunSummary> {

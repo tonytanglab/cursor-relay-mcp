@@ -14,6 +14,7 @@ export { RelayError } from "./errors.js";
 export { createMcpServer } from "./mcp-server.js";
 export { RelayService } from "./relay-service.js";
 export { StateStore } from "./state-store.js";
+export { WorkspaceApprovalBroker } from "./workspace-approval.js";
 export type * from "./sdk-port.js";
 export type * from "./types.js";
 
