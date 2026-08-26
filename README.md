@@ -6,19 +6,36 @@ A local MCP server built on the official `@cursor/sdk`. It lets MCP clients dele
 
 ## Quick start
 
-Requirements: Node.js `>=22.13` and either `CURSOR_API_KEY` or an official
-`Cursor.auth.login()` stored login.
+Requirements: Git, Node.js `>=22.13`, and a Cursor account. The recommended
+authentication method is the official `Cursor.auth.login()` stored login.
 
 ```powershell
+git clone https://github.com/tonytanglab/cursor-relay-mcp.git
+cd cursor-relay-mcp
 npm install
+
+# Opens the system default browser and stores an official SDK login for this OS user.
+node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; await Cursor.auth.login({ apiKeyName: "cursor-relay-mcp" })'
+
 npm run build
-$env:CURSOR_API_KEY = "..."
 $env:CURSOR_RELAY_WORKSPACE_ROOTS = "D:\app\git"
 node .\dist\index.js
 ```
 
-Do not commit the API key. The relay never logs or persists its value. Stored
-login support uses only the public `Cursor.auth.status()`/SDK credential flow.
+Run the login once on each computer and OS user account that starts the MCP
+server. The official SDK opens the system default browser, mints a named,
+expiring and revocable API key, and stores it in its official credential store;
+the relay never reads or returns the key value. Check the login without exposing
+credentials:
+
+```powershell
+node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.log((await Cursor.auth.status()).status)'
+```
+
+`logged-in` means the MCP process can use stored login. `CURSOR_API_KEY` remains
+an optional alternative for automation, but do not put it in `.mcp.json`, shell
+history, logs, or the repository. When using stored login, omit
+`CURSOR_API_KEY` entirely instead of setting it to an empty string.
 
 The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
 

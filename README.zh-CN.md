@@ -16,18 +16,31 @@
 
 ## 要求与安装
 
-- Node.js `>=22.13`
-- Cursor API Key，或通过官方 `Cursor.auth.login()` 建立的 stored login
+- Git、Node.js `>=22.13`
+- 可登录的 Cursor 账户
+
+推荐使用官方 `Cursor.auth.login()` stored login。每台电脑、每个启动 MCP 服务的操作系统用户执行一次：
 
 ```powershell
+git clone https://github.com/tonytanglab/cursor-relay-mcp.git
+cd cursor-relay-mcp
 npm install
+
+# 打开系统默认浏览器，完成 Cursor 官方 SDK 登录。
+node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; await Cursor.auth.login({ apiKeyName: "cursor-relay-mcp" })'
+
 npm run build
-$env:CURSOR_API_KEY = "..."
 $env:CURSOR_RELAY_WORKSPACE_ROOTS = "D:\app\git"
 node .\dist\index.js
 ```
 
-不要把 API Key 写进 `.mcp.json` 或仓库。服务不记录或持久化 Key 值；stored login 仅通过官方 `Cursor.auth.status()` 与 SDK 凭据流程识别。
+官方 SDK 会打开系统默认浏览器，创建一个具名、可过期、可撤销的 API Key，并保存到该操作系统用户的官方 SDK 凭据目录。Relay 不读取、不返回 Key 值。可用以下命令检查登录状态，不会输出凭据：
+
+```powershell
+node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.log((await Cursor.auth.status()).status)'
+```
+
+输出 `logged-in` 表示 MCP 进程可以使用 stored login。`CURSOR_API_KEY` 仍可作为自动化场景的可选替代方案，但不要把它写进 `.mcp.json`、命令历史、日志或仓库。使用 stored login 时应完全省略 `CURSOR_API_KEY`，不要传空字符串。
 
 可选环境变量：
 
@@ -63,7 +76,7 @@ node .\dist\index.js
 }
 ```
 
-让启动 MCP 客户端的父进程提供 `CURSOR_API_KEY`，不要把它放入可提交配置。
+上述配置默认使用执行 `Cursor.auth.login()` 的同一操作系统用户所保存的官方 stored login，因此不需要在 MCP 配置中放置 Key。只有明确选择环境 Key 方案时，才由启动 MCP 客户端的父进程提供 `CURSOR_API_KEY`。
 
 ## 工具合约
 
