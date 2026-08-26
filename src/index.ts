@@ -2,13 +2,13 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { realpath } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import { loadConfig } from "./config.js";
+import { loadConfig, normalizeCursorApiKeyEnvironment } from "./config.js";
 import { CursorSdkAdapter } from "./cursor-sdk-adapter.js";
 import { createMcpServer } from "./mcp-server.js";
 import { RelayService } from "./relay-service.js";
 import { StateStore } from "./state-store.js";
 
-export { loadConfig } from "./config.js";
+export { loadConfig, normalizeCursorApiKeyEnvironment } from "./config.js";
 export { CursorSdkAdapter } from "./cursor-sdk-adapter.js";
 export { RelayError } from "./errors.js";
 export { createMcpServer } from "./mcp-server.js";
@@ -18,11 +18,12 @@ export type * from "./sdk-port.js";
 export type * from "./types.js";
 
 export async function main() {
+  normalizeCursorApiKeyEnvironment();
   const config = loadConfig();
   const service = new RelayService(
     config,
     new StateStore(config.stateDir),
-    new CursorSdkAdapter(config.stateDir, config.apiKey),
+    new CursorSdkAdapter(config.stateDir, config.environmentApiKeyConfigured),
   );
   await createMcpServer(service).connect(new StdioServerTransport());
 }

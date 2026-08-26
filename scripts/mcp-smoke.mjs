@@ -17,10 +17,18 @@ try {
   const tools = await client.listTools();
   if (!tools.tools.some((tool) => tool.name === "wait_run"))
     throw new Error("wait_run missing");
+  const doctorTool = tools.tools.find((tool) => tool.name === "doctor");
+  const startTool = tools.tools.find((tool) => tool.name === "start_run");
+  if (
+    doctorTool?.annotations?.readOnlyHint !== true ||
+    startTool?.annotations?.destructiveHint !== true ||
+    startTool.annotations.idempotentHint !== true
+  )
+    throw new Error("tool annotations missing");
   const result = await client.callTool({ name: "doctor", arguments: {} });
   if (result.isError) throw new Error("doctor returned error");
   const structured = result.structuredContent;
-  if (!structured || structured.ok !== true)
+  if (!structured || typeof structured.ok !== "boolean")
     throw new Error("doctor structured output missing");
   process.stdout.write(`MCP smoke passed (${tools.tools.length} tools)\n`);
 } finally {

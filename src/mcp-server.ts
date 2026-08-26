@@ -24,6 +24,7 @@ export function createMcpServer(service: RelayService): McpServer {
       description:
         "检查 Cursor Relay 配置、认证与持久目录；不调用 Cursor 模型。",
       inputSchema: {},
+      annotations: readOnlyAnnotations(false),
     },
     guarded(() => service.doctor()),
   );
@@ -34,6 +35,7 @@ export function createMcpServer(service: RelayService): McpServer {
       description:
         "从当前 Cursor 账户发现可用模型、别名与参数；start_run 前应调用。",
       inputSchema: {},
+      annotations: readOnlyAnnotations(true),
     },
     guarded(async () => service.listModels()),
   );
@@ -52,6 +54,7 @@ export function createMcpServer(service: RelayService): McpServer {
         idempotencyKey: z.string().min(8).max(200),
         timeoutMs: z.number().int().optional(),
       },
+      annotations: mutatingAnnotations(true),
     },
     guarded(async (input) => service.startRun(input)),
   );
@@ -70,6 +73,7 @@ export function createMcpServer(service: RelayService): McpServer {
         idempotencyKey: z.string().min(8).max(200),
         timeoutMs: z.number().int().optional(),
       },
+      annotations: mutatingAnnotations(true),
     },
     guarded(async (input) => service.replyRun(input)),
   );
@@ -80,6 +84,7 @@ export function createMcpServer(service: RelayService): McpServer {
       description:
         "读取一个持久运行的当前状态，并在进程重启后自动重连 Cursor SDK 运行。",
       inputSchema: { relayRunId: z.string().min(1) },
+      annotations: readOnlyAnnotations(true),
     },
     guarded(async ({ relayRunId }) => ({
       run: await service.getRun(relayRunId),
@@ -95,6 +100,7 @@ export function createMcpServer(service: RelayService): McpServer {
         relayRunId: z.string().min(1),
         waitMs: z.number().int().min(0).max(30_000).optional(),
       },
+      annotations: readOnlyAnnotations(true),
     },
     guarded(async ({ relayRunId, waitMs }) =>
       service.waitRun(relayRunId, waitMs),
@@ -106,6 +112,7 @@ export function createMcpServer(service: RelayService): McpServer {
     {
       description: "取消仍在执行的 Cursor SDK 运行；重复取消具有稳定结果。",
       inputSchema: { relayRunId: z.string().min(1) },
+      annotations: mutatingAnnotations(true),
     },
     guarded(async ({ relayRunId }) => service.cancelRun(relayRunId)),
   );
@@ -115,6 +122,7 @@ export function createMcpServer(service: RelayService): McpServer {
     {
       description: "按创建时间倒序列出 Relay 持久运行。",
       inputSchema: { limit: z.number().int().min(1).max(200).optional() },
+      annotations: readOnlyAnnotations(false),
     },
     guarded(async ({ limit }) => service.listRuns(limit)),
   );
@@ -129,6 +137,7 @@ export function createMcpServer(service: RelayService): McpServer {
         afterSequence: z.number().int().min(0).optional(),
         limit: z.number().int().min(1).max(500).optional(),
       },
+      annotations: readOnlyAnnotations(true),
     },
     guarded(async ({ relayRunId, afterSequence, limit }) =>
       service.readEvents(relayRunId, afterSequence, limit),
@@ -136,6 +145,24 @@ export function createMcpServer(service: RelayService): McpServer {
   );
 
   return server;
+}
+
+function readOnlyAnnotations(openWorldHint: boolean) {
+  return {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint,
+  };
+}
+
+function mutatingAnnotations(openWorldHint: boolean) {
+  return {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint,
+  };
 }
 
 function guarded<TInput extends Record<string, unknown>>(

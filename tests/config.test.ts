@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   authorizeWorkspace,
   loadConfig,
+  normalizeCursorApiKeyEnvironment,
   permissionOptions,
 } from "../src/config.js";
 import { RelayError } from "../src/errors.js";
@@ -35,12 +36,22 @@ test("permission presets fail closed", () => {
     sandboxEnabled: true,
     autoReview: true,
   });
+  assert.equal(
+    permissionOptions("read-only", false, false, false).sandboxEnabled,
+    false,
+  );
   assert.throws(
-    () => permissionOptions("danger-full-access"),
+    () => permissionOptions("danger-full-access", true),
+    (error: unknown) =>
+      error instanceof RelayError &&
+      error.code === "DANGEROUS_PERMISSION_DISABLED",
+  );
+  assert.throws(
+    () => permissionOptions("danger-full-access", false, true),
     /confirmedDangerousPermission/u,
   );
   assert.equal(
-    permissionOptions("danger-full-access", true).sandboxEnabled,
+    permissionOptions("danger-full-access", true, true).sandboxEnabled,
     false,
   );
 });
@@ -49,4 +60,49 @@ test("config does not infer workspace roots", () => {
   const config = loadConfig({ CURSOR_RELAY_DEFAULT_TIMEOUT_MS: "1234" });
   assert.deepEqual(config.workspaceRoots, []);
   assert.equal(config.defaultTimeoutMs, 1234);
+  assert.equal(config.dangerFullAccessEnabled, false);
+  assert.equal(config.readOnlySandboxEnabled, true);
+  assert.equal(config.environmentApiKeyConfigured, false);
+  assert.deepEqual(config.settingSources, ["project"]);
+});
+
+test("blank API key is missing and normalized so stored login can be used", () => {
+  const env = { CURSOR_API_KEY: "  " };
+  assert.equal(loadConfig(env).environmentApiKeyConfigured, false);
+  normalizeCursorApiKeyEnvironment(env);
+  assert.equal("CURSOR_API_KEY" in env, false);
+});
+
+test("configuration fails fast for invalid booleans, numbers and setting sources", () => {
+  assert.throws(
+    () => loadConfig({ CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS: "yes" }),
+    /只能是 true 或 false/u,
+  );
+  assert.throws(
+    () => loadConfig({ CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED: "yes" }),
+    /只能是 true 或 false/u,
+  );
+  assert.throws(
+    () => loadConfig({ CURSOR_RELAY_MAX_EVENTS: "12oops" }),
+    /必须是正整数/u,
+  );
+  assert.throws(
+    () => loadConfig({ CURSOR_RELAY_SETTING_SOURCES: "project,plugins" }),
+    /仅允许/u,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        CURSOR_RELAY_DEFAULT_TIMEOUT_MS: "2000",
+        CURSOR_RELAY_MAX_TIMEOUT_MS: "1000",
+      }),
+    /不能大于/u,
+  );
+  assert.deepEqual(
+    loadConfig({
+      CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS: "true",
+      CURSOR_RELAY_SETTING_SOURCES: "project,team,mdm",
+    }).settingSources,
+    ["project", "team", "mdm"],
+  );
 });

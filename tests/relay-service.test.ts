@@ -27,17 +27,40 @@ class FakeRun implements CursorRunHandle {
     },
   );
   cancelled = false;
+  released = 0;
+  readonly order: string[] = [];
+  readonly createdAt = Date.now();
+  private terminalResult: CursorRunResult | undefined;
+  private streamActive = false;
+  concurrentWaitObserved = false;
 
   constructor(
     readonly id: string,
     readonly agentId: string,
+    private readonly initialEvents: CursorEvent[] = [],
   ) {}
+  supports() {
+    return true;
+  }
+  currentResult() {
+    return this.terminalResult;
+  }
   async *stream(): AsyncGenerator<CursorEvent, void> {
-    yield { type: "status", status: "RUNNING" };
-    await this.resultPromise;
-    yield { type: "status", status: this.status.toUpperCase() };
+    this.streamActive = true;
+    try {
+      this.order.push("stream:start");
+      yield { type: "status", status: "RUNNING" };
+      for (const event of this.initialEvents) yield event;
+      await this.resultPromise;
+      yield { type: "status", status: this.status.toUpperCase() };
+    } finally {
+      this.streamActive = false;
+      this.order.push("stream:end");
+    }
   }
   wait() {
+    if (this.streamActive) this.concurrentWaitObserved = true;
+    this.order.push("wait");
     return this.resultPromise;
   }
   async cancel() {
@@ -46,14 +69,23 @@ class FakeRun implements CursorRunHandle {
   }
   finish(result: CursorRunResult) {
     this.status = result.status;
+    this.terminalResult = result;
     this.resolveResult(result);
   }
   fail(error: unknown) {
-    this.rejectResult(error);
+    this.status = "error";
+    setTimeout(() => this.rejectResult(error), 50);
   }
   finishAfterStatus(result: CursorRunResult, delayMs: number) {
     this.status = result.status;
+    this.terminalResult = result;
     setTimeout(() => this.resolveResult(result), delayMs);
+  }
+  finishAfterDelay(result: CursorRunResult, delayMs: number) {
+    setTimeout(() => this.finish(result), delayMs);
+  }
+  async release() {
+    this.released += 1;
   }
 }
 
@@ -68,8 +100,20 @@ class FakeSdk implements CursorSdkPort {
   ];
   readonly runs = new Map<string, FakeRun>();
   launches: AgentLaunchOptions[] = [];
+  listModelsCalls = 0;
+  nextEvents: CursorEvent[] = [];
+  findRunError: Error | undefined;
+  authMode:
+    | { mode: "environment-api-key" }
+    | { mode: "stored-login"; expiresAtMs?: number }
+    | { mode: "missing" } = { mode: "environment-api-key" };
+
+  async authStatus() {
+    return this.authMode;
+  }
 
   async listModels() {
+    this.listModelsCalls += 1;
     return this.models;
   }
   async start(_task: string, options: AgentLaunchOptions) {
@@ -84,6 +128,7 @@ class FakeSdk implements CursorSdkPort {
     return run;
   }
   async findRun(agentId: string) {
+    if (this.findRunError) throw this.findRunError;
     return [...this.runs.values()].find((run) => run.agentId === agentId);
   }
   private create(options: AgentLaunchOptions) {
@@ -92,7 +137,12 @@ class FakeSdk implements CursorSdkPort {
     );
     if (existing) return existing;
     this.launches.push(options);
-    const run = new FakeRun(`run-${this.runs.size + 1}`, options.agentId);
+    const run = new FakeRun(
+      `run-${this.runs.size + 1}`,
+      options.agentId,
+      this.nextEvents,
+    );
+    this.nextEvents = [];
     this.runs.set(run.id, run);
     return run;
   }
@@ -102,12 +152,15 @@ async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "cursor-relay-service-"));
   const sdk = new FakeSdk();
   const config: RelayConfig = {
-    apiKey: "secret-for-test",
+    environmentApiKeyConfigured: true,
     stateDir: join(dir, "state"),
     workspaceRoots: [dir],
     defaultTimeoutMs: 5_000,
     maxTimeoutMs: 20_000,
     maxEventsPerRun: 10,
+    dangerFullAccessEnabled: false,
+    readOnlySandboxEnabled: true,
+    settingSources: ["project"],
   };
   const store = new StateStore(config.stateDir);
   return {
@@ -165,6 +218,14 @@ test("model validation, permission mapping, idempotency and wait contract", asyn
     const terminal = await item.service.waitRun(first.run.relayRunId, 2_000);
     assert.equal(terminal.terminal, true);
     assert.equal(terminal.run.assistantText, "done");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const sdkRun = item.sdk.runs.get(first.run.sdkRunId ?? "");
+    assert.ok(sdkRun);
+    assert.equal(sdkRun.concurrentWaitObserved, false);
+    assert.ok(
+      sdkRun.order.indexOf("stream:start") < sdkRun.order.indexOf("wait"),
+    );
+    assert.equal(sdkRun.released, 1);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }
@@ -209,6 +270,7 @@ test("total timeout cancels SDK run and persists structured error", async () => 
       item.sdk.runs.get(started.run.sdkRunId ?? "")?.cancelled,
       true,
     );
+    assert.equal(item.sdk.runs.get(started.run.sdkRunId ?? "")?.released, 1);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }
@@ -229,6 +291,151 @@ test("monitor rejection is contained and persisted instead of escaping", async (
     const result = await item.service.waitRun(started.run.relayRunId, 2_000);
     assert.equal(result.run.status, "failed");
     assert.equal(result.run.error?.code, "SDK_MONITOR_FAILED");
+    assert.equal(item.sdk.runs.get(started.run.sdkRunId ?? "")?.released, 1);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("100 concurrent idempotent starts share one SDK launch", async () => {
+  const item = await fixture();
+  try {
+    const input = {
+      workspace: item.dir,
+      task: "single flight",
+      model: { id: "cursor-test" },
+      idempotencyKey: "one-hundred-callers",
+    };
+    const results = await Promise.all(
+      Array.from({ length: 100 }, () => item.service.startRun(input)),
+    );
+    assert.equal(item.sdk.launches.length, 1);
+    assert.equal(new Set(results.map((result) => result.run.sdkRunId)).size, 1);
+    const run = item.sdk.runs.get(results[0]?.run.sdkRunId ?? "");
+    run?.finish({ status: "finished", result: "once" });
+    await item.service.waitRun(results[0]?.run.relayRunId ?? "", 2_000);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor supports official stored login without exposing credentials", async () => {
+  const item = await fixture();
+  try {
+    item.sdk.authMode = { mode: "stored-login", expiresAtMs: 123_456 };
+    const doctor = await item.service.doctor();
+    assert.equal(doctor.ok, true);
+    assert.equal(doctor.authentication, "stored-login");
+    assert.equal(doctor.authenticationExpiresAtMs, 123_456);
+    assert.equal(doctor.dangerFullAccessEnabled, false);
+    assert.equal(JSON.stringify(doctor).includes("secret-for-test"), false);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("model aliases canonicalize, variants augment parameter validation, duplicates fail and cache is reused", async () => {
+  const item = await fixture();
+  const baseModel = item.sdk.models[0];
+  assert.ok(baseModel);
+  item.sdk.models[0] = {
+    ...baseModel,
+    parameters: [
+      { id: "reasoning", values: [{ value: "max" }, { value: "low" }] },
+    ],
+    variants: [
+      {
+        displayName: "Maximum",
+        params: [{ id: "reasoning", value: "max" }],
+      },
+    ],
+  };
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "canonical",
+      model: { id: "test", params: [{ id: "reasoning", value: "max" }] },
+      idempotencyKey: "canonical-model",
+    });
+    assert.equal(started.run.model.id, "cursor-test");
+    const freeCombination = await item.service.startRun({
+      workspace: item.dir,
+      task: "valid catalog parameter outside preset variants",
+      model: { id: "cursor-test", params: [{ id: "reasoning", value: "low" }] },
+      idempotencyKey: "non-preset-model-parameter",
+    });
+    assert.equal(freeCombination.run.model.params?.[0]?.value, "low");
+    await assert.rejects(
+      item.service.startRun({
+        workspace: item.dir,
+        task: "duplicate",
+        model: {
+          id: "cursor-test",
+          params: [
+            { id: "reasoning", value: "max" },
+            { id: "reasoning", value: "max" },
+          ],
+        },
+        idempotencyKey: "duplicate-params",
+      }),
+      (error: unknown) =>
+        error instanceof RelayError &&
+        error.code === "MODEL_PARAMETER_DUPLICATE",
+    );
+    await item.service.listModels();
+    assert.equal(item.sdk.listModelsCalls, 1);
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", model: started.run.model });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("run summaries omit events and oversized event data is explicit", async () => {
+  const item = await fixture();
+  try {
+    item.sdk.nextEvents = [
+      { type: "tool_call", result: "x".repeat(12_000), apiKey: "hidden" },
+    ];
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "large event",
+      model: { id: "cursor-test" },
+      idempotencyKey: "large-event",
+    });
+    item.sdk.runs.get(started.run.sdkRunId ?? "")?.finish({
+      status: "finished",
+      result: "done",
+      requestId: "request-1",
+      durationMs: 42,
+      usage: {
+        inputTokens: 1,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 3,
+      },
+    });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+    const summary = await item.service.getRun(started.run.relayRunId);
+    assert.equal("events" in summary, false);
+    assert.ok(summary.eventCount >= 1);
+    assert.equal(summary.requestId, "request-1");
+    assert.equal(summary.durationMs, 42);
+    assert.equal(summary.usage?.totalTokens, 3);
+    const events = await item.service.readEvents(started.run.relayRunId);
+    const large = events.events.find((event) => event.type === "tool_call");
+    assert.equal(
+      (large?.data as { truncated?: boolean } | undefined)?.truncated,
+      true,
+    );
+    assert.ok(Buffer.byteLength(JSON.stringify(large?.data), "utf8") < 8_192);
+    const listed = await item.service.listRuns();
+    const firstListed = listed.runs[0];
+    assert.ok(firstListed);
+    assert.equal("events" in firstListed, false);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }
@@ -300,11 +507,88 @@ test("deadline grace preserves a terminal result whose wait signal is late", asy
     setTimeout(() => {
       item.sdk.runs
         .get(started.run.sdkRunId ?? "")
-        ?.finishAfterStatus({ status: "finished", result: "on time" }, 150);
+        ?.finishAfterDelay({ status: "finished", result: "on time" }, 150);
     }, 950);
     const result = await item.service.waitRun(started.run.relayRunId, 2_000);
     assert.equal(result.run.status, "succeeded");
     assert.equal(result.run.assistantText, "on time");
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("expired ambiguous recovery becomes a stable failure instead of wedging", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "ambiguous after deadline",
+      model: { id: "cursor-test" },
+      idempotencyKey: "expired-ambiguous-recovery",
+    });
+    await item.store.update((state) => {
+      const run = state.runs[started.run.relayRunId];
+      assert.ok(run);
+      delete run.sdkRunId;
+      run.status = "starting";
+      run.deadlineAt = new Date(Date.now() - 1_000).toISOString();
+    });
+    item.sdk.findRunError = new RelayError(
+      "SDK_RUN_RECOVERY_AMBIGUOUS",
+      "ambiguous",
+    );
+    const resumed = new RelayService(item.config, item.store, item.sdk);
+    const result = await resumed.getRun(started.run.relayRunId);
+    assert.equal(result.status, "failed");
+    assert.equal(result.error?.code, "SDK_RUN_RECOVERY_AMBIGUOUS");
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("explicit cancellation reaches cancelled and releases the owned agent", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "cancel me",
+      model: { id: "cursor-test" },
+      idempotencyKey: "explicit-cancel",
+    });
+    await item.service.cancelRun(started.run.relayRunId);
+    const terminal = await item.service.waitRun(started.run.relayRunId, 2_000);
+    assert.equal(terminal.run.status, "cancelled");
+    assert.equal(item.sdk.runs.get(started.run.sdkRunId ?? "")?.released, 1);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("restart after deadline preserves an SDK terminal result before cancelling", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "finished while host was away",
+      model: { id: "cursor-test" },
+      idempotencyKey: "expired-host-terminal-sdk",
+    });
+    await item.store.update((state) => {
+      const run = state.runs[started.run.relayRunId];
+      assert.ok(run);
+      run.deadlineAt = new Date(Date.now() - 1_000).toISOString();
+    });
+    const sdkRun = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(sdkRun);
+    sdkRun.finish({ status: "finished", result: "preserved" });
+    const resumed = new RelayService(item.config, item.store, item.sdk);
+    const result = await resumed.getRun(started.run.relayRunId);
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.assistantText, "preserved");
+    assert.equal(sdkRun.cancelled, false);
+    for (let attempt = 0; attempt < 100 && sdkRun.released === 0; attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(sdkRun.released, 1);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }

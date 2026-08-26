@@ -17,6 +17,14 @@ export interface ModelSelection {
   id: string;
   params?: ModelParameter[] | undefined;
 }
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  reasoningTokens?: number | undefined;
+}
 export interface RelayEvent {
   sequence: number;
   timestamp: string;
@@ -27,6 +35,7 @@ export interface RelayEvent {
 export interface RelayRun {
   relayRunId: string;
   sdkRunId?: string | undefined;
+  requestId?: string | undefined;
   agentId: string;
   workspace: string;
   task: string;
@@ -38,10 +47,17 @@ export interface RelayRun {
   updatedAt: string;
   deadlineAt: string;
   assistantText?: string | undefined;
+  effectiveModel?: ModelSelection | undefined;
+  durationMs?: number | undefined;
+  usage?: TokenUsage | undefined;
   error?: RelayErrorShape | undefined;
   parentRunId?: string | undefined;
   events: RelayEvent[];
 }
+
+export type RelayRunSummary = Omit<RelayRun, "events"> & {
+  eventCount: number;
+};
 
 export interface RelayErrorShape {
   code: string;

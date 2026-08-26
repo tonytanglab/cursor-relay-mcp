@@ -5,12 +5,15 @@ import { RelayError } from "./errors.js";
 import type { PermissionPreset } from "./types.js";
 
 export interface RelayConfig {
-  apiKey?: string;
+  environmentApiKeyConfigured: boolean;
   stateDir: string;
   workspaceRoots: string[];
   defaultTimeoutMs: number;
   maxTimeoutMs: number;
   maxEventsPerRun: number;
+  dangerFullAccessEnabled: boolean;
+  readOnlySandboxEnabled: boolean;
+  settingSources: ("project" | "team" | "mdm")[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
@@ -19,25 +22,99 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     .map((item) => item.trim())
     .filter(Boolean)
     .map((item) => resolve(item));
+  const defaultTimeoutMs = positiveInt(
+    "CURSOR_RELAY_DEFAULT_TIMEOUT_MS",
+    env.CURSOR_RELAY_DEFAULT_TIMEOUT_MS,
+    30 * 60_000,
+  );
+  const maxTimeoutMs = positiveInt(
+    "CURSOR_RELAY_MAX_TIMEOUT_MS",
+    env.CURSOR_RELAY_MAX_TIMEOUT_MS,
+    4 * 60 * 60_000,
+  );
+  if (defaultTimeoutMs > maxTimeoutMs) {
+    throw new RelayError(
+      "CONFIG_INVALID",
+      "CURSOR_RELAY_DEFAULT_TIMEOUT_MS 不能大于 CURSOR_RELAY_MAX_TIMEOUT_MS",
+    );
+  }
   return {
-    ...(env.CURSOR_API_KEY ? { apiKey: env.CURSOR_API_KEY } : {}),
+    environmentApiKeyConfigured: Boolean(env.CURSOR_API_KEY?.trim()),
     stateDir: resolve(
       env.CURSOR_RELAY_STATE_DIR ?? resolve(homedir(), ".cursor-relay-mcp"),
     ),
     workspaceRoots: roots,
-    defaultTimeoutMs: positiveInt(
-      env.CURSOR_RELAY_DEFAULT_TIMEOUT_MS,
-      30 * 60_000,
+    defaultTimeoutMs,
+    maxTimeoutMs,
+    maxEventsPerRun: positiveInt(
+      "CURSOR_RELAY_MAX_EVENTS",
+      env.CURSOR_RELAY_MAX_EVENTS,
+      1_000,
     ),
-    maxTimeoutMs: positiveInt(env.CURSOR_RELAY_MAX_TIMEOUT_MS, 4 * 60 * 60_000),
-    maxEventsPerRun: positiveInt(env.CURSOR_RELAY_MAX_EVENTS, 1_000),
+    dangerFullAccessEnabled: strictBoolean(
+      "CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS",
+      env.CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS,
+      false,
+    ),
+    readOnlySandboxEnabled: strictBoolean(
+      "CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED",
+      env.CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED,
+      true,
+    ),
+    settingSources: parseSettingSources(env.CURSOR_RELAY_SETTING_SOURCES),
   };
 }
 
-function positiveInt(value: string | undefined, fallback: number): number {
+export function normalizeCursorApiKeyEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (env.CURSOR_API_KEY !== undefined && !env.CURSOR_API_KEY.trim())
+    delete env.CURSOR_API_KEY;
+}
+
+function positiveInt(
+  name: string,
+  value: string | undefined,
+  fallback: number,
+): number {
   if (value === undefined) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  if (!/^[1-9]\d*$/u.test(value))
+    throw new RelayError("CONFIG_INVALID", `${name} 必须是正整数`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed))
+    throw new RelayError("CONFIG_INVALID", `${name} 超出安全整数范围`);
+  return parsed;
+}
+
+function strictBoolean(
+  name: string,
+  value: string | undefined,
+  fallback: boolean,
+): boolean {
+  if (value === undefined) return fallback;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new RelayError("CONFIG_INVALID", `${name} 只能是 true 或 false`);
+}
+
+function parseSettingSources(
+  value: string | undefined,
+): ("project" | "team" | "mdm")[] {
+  if (value === undefined) return ["project"];
+  const sources = value.split(",").map((item) => item.trim());
+  if (
+    sources.length === 0 ||
+    sources.some(
+      (source) => source !== "project" && source !== "team" && source !== "mdm",
+    ) ||
+    new Set(sources).size !== sources.length
+  ) {
+    throw new RelayError(
+      "CONFIG_INVALID",
+      "CURSOR_RELAY_SETTING_SOURCES 仅允许不重复的 project、team、mdm",
+    );
+  }
+  return sources as ("project" | "team" | "mdm")[];
 }
 
 export async function authorizeWorkspace(
@@ -80,8 +157,16 @@ export async function authorizeWorkspace(
 export function permissionOptions(
   permission: PermissionPreset,
   confirmedDangerousPermission = false,
+  dangerFullAccessEnabled = false,
+  readOnlySandboxEnabled = true,
 ) {
   if (permission === "danger-full-access") {
+    if (!dangerFullAccessEnabled) {
+      throw new RelayError(
+        "DANGEROUS_PERMISSION_DISABLED",
+        "服务端未启用 danger-full-access",
+      );
+    }
     if (!confirmedDangerousPermission) {
       throw new RelayError(
         "DANGEROUS_PERMISSION_NOT_CONFIRMED",
@@ -93,7 +178,7 @@ export function permissionOptions(
   if (permission === "read-only") {
     return {
       tools: ["read", "grep", "glob", "ls"],
-      sandboxEnabled: true,
+      sandboxEnabled: readOnlySandboxEnabled,
       autoReview: true,
     };
   }

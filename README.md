@@ -6,7 +6,8 @@ A local MCP server built on the official `@cursor/sdk`. It lets MCP clients dele
 
 ## Quick start
 
-Requirements: Node.js `>=22.13` and a Cursor API key.
+Requirements: Node.js `>=22.13` and either `CURSOR_API_KEY` or an official
+`Cursor.auth.login()` stored login.
 
 ```powershell
 npm install
@@ -16,11 +17,39 @@ $env:CURSOR_RELAY_WORKSPACE_ROOTS = "D:\app\git"
 node .\dist\index.js
 ```
 
-Do not commit the API key. The relay reads it only from the process environment and never persists it.
+Do not commit the API key. The relay never logs or persists its value. Stored
+login support uses only the public `Cursor.auth.status()`/SDK credential flow.
 
 The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
 
-Security defaults are fail-closed: an empty workspace allowlist denies all runs, permissions default to read-only, the Cursor sandbox is enabled, and only project settings are loaded.
+Security defaults are fail-closed: an empty workspace allowlist denies all
+runs, permissions default to read-only, the Cursor sandbox is enabled, and only
+project settings are loaded. `danger-full-access` requires both
+`CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true` at server startup and
+`confirmedDangerousPermission=true` on the request. Leave the server switch off
+for normal use.
+
+If the official SDK reports that local sandboxing is unsupported, an operator
+may set `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED=false`. This exception applies
+only to the `read-only` preset; its public tool allowlist remains restricted to
+`read`, `grep`, `glob`, and `ls`. The default stays `true`, and
+`workspace-write` still requires SDK sandbox support.
+
+`CURSOR_RELAY_SETTING_SOURCES` is an optional comma-separated list restricted
+to the public `project`, `team`, and `mdm` setting layers. It defaults to
+`project`; `user`, `plugins`, and `all` are deliberately rejected to avoid
+ambient or recursive MCP behavior.
+
+Run summaries omit streamed events and report `eventCount`; use `read_events`
+for event pages. Event data larger than 8 KiB is replaced with explicit
+truncation metadata. Redaction is based on sensitive field names and is not a
+general secret scanner, so use a private state directory and avoid secrets in
+prompts.
+
+The relay uses only public exports from the pinned SDK: model discovery,
+`Agent.create`/`resume`/`listRuns`/`getRun`, `Run.stream`/`wait`/`cancel`, and
+official authentication status. It does not inspect Cursor IDE state or private
+endpoints. Restarting the Cursor IDE is not required for local SDK runs.
 
 ## Verification
 
