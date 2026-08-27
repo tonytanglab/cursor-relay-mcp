@@ -39,8 +39,7 @@ try {
     name: "authorize_workspace",
     arguments: {
       workspace: stateDir,
-      task: "MCP smoke read-only authorization",
-      idempotencyKey: "mcp-smoke-approval",
+      permission: "workspace-write",
     },
   });
   if (approval.isError) throw new Error("authorize_workspace returned error");
@@ -49,7 +48,11 @@ try {
     typeof approvalData !== "object" ||
     approvalData === null ||
     !("token" in approvalData) ||
-    typeof approvalData.token !== "string"
+    typeof approvalData.token !== "string" ||
+    !("permission" in approvalData) ||
+    approvalData.permission !== "workspace-write" ||
+    !("source" in approvalData) ||
+    approvalData.source !== "conversation-capability"
   )
     throw new Error("authorize_workspace capability missing");
   process.stdout.write(`MCP smoke passed (${tools.tools.length} tools)\n`);

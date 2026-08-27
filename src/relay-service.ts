@@ -59,6 +59,7 @@ export class RelayService {
       workspaceRoots: this.config.workspaceRoots,
       dangerFullAccessEnabled: this.config.dangerFullAccessEnabled,
       readOnlySandboxEnabled: this.config.readOnlySandboxEnabled,
+      workspaceWriteSandboxEnabled: this.config.workspaceWriteSandboxEnabled,
       settingSources: this.config.settingSources,
       warning:
         authentication.mode === "missing"
@@ -71,16 +72,16 @@ export class RelayService {
     return { models: await this.getModels() };
   }
 
-  async authorizeWorkspaceOnce(
+  async authorizeConversationWorkspace(
     input: AuthorizeWorkspaceInput,
     callerScope = "stdio-process",
   ) {
     const workspace = await resolveWorkspace(input.workspace);
     const permission = input.permission ?? "read-only";
-    if (permission !== "read-only") {
+    if (permission === "danger-full-access") {
       throw new RelayError(
         "WORKSPACE_APPROVAL_PERMISSION_DENIED",
-        "当前对话的一次性工作区授权仅允许 read-only；写权限仍须静态白名单",
+        "当前对话工作区授权不允许 danger-full-access；危险权限仍须静态白名单与二次确认",
       );
     }
     if (await workspaceIsWithinRoots(workspace, this.config.workspaceRoots)) {
@@ -93,18 +94,16 @@ export class RelayService {
     }
     const grant = this.workspaceApprovals.issue({
       workspace,
-      task: input.task,
-      idempotencyKey: input.idempotencyKey,
+      permission,
       callerScope,
     });
     return {
       authorizationRequired: true,
       workspace,
       permission,
-      source: "interactive-once" as const,
+      source: "conversation-capability" as const,
       ...grant,
-      instruction:
-        "立即用相同 workspace、task、idempotencyKey 和 read-only 调用 start_run，并传入 workspaceApprovalToken；令牌只显示一次。",
+      instruction: `在当前对话后续运行中，用相同 workspace 和不高于 ${permission} 的权限调用 start_run 或 reply_run，并传入 workspaceApprovalToken；令牌只显示一次但可在本对话内复用。`,
     };
   }
 
@@ -118,10 +117,12 @@ export class RelayService {
       this.config.workspaceRoots,
     );
     const permission = input.permission ?? "read-only";
-    if (!staticallyAllowed && permission !== "read-only") {
+    const conversationPermission =
+      permission === "danger-full-access" ? undefined : permission;
+    if (!staticallyAllowed && conversationPermission === undefined) {
       throw new RelayError(
         "WORKSPACE_DENIED",
-        "工作区不在静态白名单内；当前对话授权不能授予 workspace-write 或 danger-full-access",
+        "工作区不在静态白名单内；当前对话授权不能授予 danger-full-access",
       );
     }
     permissionOptions(
@@ -129,6 +130,7 @@ export class RelayService {
       input.confirmedDangerousPermission,
       this.config.dangerFullAccessEnabled,
       this.config.readOnlySandboxEnabled,
+      this.config.workspaceWriteSandboxEnabled,
     );
     const timeoutMs = this.normalizeTimeout(input.timeoutMs);
     const model = await this.validateModel(input.model);
@@ -167,8 +169,7 @@ export class RelayService {
 
     const approvalRequest = {
       workspace,
-      task: input.task,
-      idempotencyKey: input.idempotencyKey,
+      permission: conversationPermission ?? "read-only",
       callerScope,
     };
     const approval = staticallyAllowed
@@ -193,7 +194,7 @@ export class RelayService {
       workspaceAuthorization: staticallyAllowed
         ? { source: "static-allowlist" }
         : {
-            source: "interactive-once",
+            source: "conversation-capability",
             approvalId: approval?.approvalId,
             authorizedAt: approval?.authorizedAt,
           },
@@ -225,16 +226,6 @@ export class RelayService {
       state.operations[input.idempotencyKey] = { fingerprint, relayRunId };
       return { created: true as const, relayRunId };
     });
-    if (
-      reservation.created &&
-      approval &&
-      input.workspaceApprovalToken !== undefined
-    ) {
-      this.workspaceApprovals.consume(
-        input.workspaceApprovalToken,
-        approval.approvalId,
-      );
-    }
     if (!reservation.created) {
       const racedRun = await this.requireRun(reservation.relayRunId);
       await this.ensureAttached(
@@ -826,6 +817,7 @@ export class RelayService {
       confirmedDangerousPermission || run.dangerousPermissionConfirmed === true,
       this.config.dangerFullAccessEnabled,
       this.config.readOnlySandboxEnabled,
+      this.config.workspaceWriteSandboxEnabled,
     );
     return {
       agentId: run.agentId,

@@ -11,7 +11,7 @@
 - Relay 状态采用原子 UTF-8 JSON，Cursor SDK 状态采用官方 `JsonlLocalAgentStore`；进程重启后可通过 `Agent.getRun` 重连。
 - `wait_run` 每次最多等待 30 秒，未结束时明确返回 `mustCallAgain=true`。
 - 总运行超时、取消、有限事件缓冲、8 KiB 单事件上限、敏感字段名脱敏以及统一结构化错误。
-- 安全默认值：无人值守运行必须命中静态工作区白名单；当前对话明确授权时可签发短时一次性只读 capability；默认只读并只加载项目设置；支持的非 Windows 主机默认启用 Cursor 沙箱，Windows 因当前 SDK 本地运行时不支持而默认关闭沙箱，但仍强制只读工具白名单。
+- 安全默认值：无人值守运行必须命中静态工作区白名单；当前对话明确授权时可为精确工作区签发对话级、可复用的只读或读写 capability；默认只读并只加载项目设置；支持的非 Windows 主机默认启用 Cursor 沙箱，Windows 因当前 SDK 本地运行时不支持而关闭沙箱，但仍强制权限预设和工具限制。
 - SDK Agent 句柄在运行终态后释放；模型、requestId、耗时和 token usage 使用官方公开结果字段持久化。
 
 ## 要求与安装
@@ -46,17 +46,18 @@ node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.l
 
 可选环境变量：
 
-| 变量                                     | 默认值                | 说明                                                                                                   |
-| ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
-| `CURSOR_API_KEY`                         | 无                    | 可选环境 Key；未设置时使用官方 stored login                                                            |
-| `CURSOR_RELAY_WORKSPACE_ROOTS`           | 空                    | `path.delimiter` 分隔的无人值守允许根目录；为空时仍可使用当前对话的一次性只读授权                      |
-| `CURSOR_RELAY_STATE_DIR`                 | `~/.cursor-relay-mcp` | Relay 与 Cursor SDK 持久状态目录                                                                       |
-| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`        | `1800000`             | 默认总运行超时                                                                                         |
-| `CURSOR_RELAY_MAX_TIMEOUT_MS`            | `14400000`            | 允许的最大总超时                                                                                       |
-| `CURSOR_RELAY_MAX_EVENTS`                | `1000`                | 每个运行保留的最大事件数                                                                               |
-| `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS` | `false`               | 服务端危险权限总开关；仅接受严格的 `true`/`false`                                                      |
-| `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED` | 平台自适应            | 只读预设是否启用 SDK 沙箱；Windows 因当前 SDK 不兼容而强制为 `false`，其他平台默认 `true` 且可显式关闭 |
-| `CURSOR_RELAY_SETTING_SOURCES`           | `project`             | 逗号分隔的设置层，仅允许 `project`、`team`、`mdm`                                                      |
+| 变量                                           | 默认值                | 说明                                                                                                   |
+| ---------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------ |
+| `CURSOR_API_KEY`                               | 无                    | 可选环境 Key；未设置时使用官方 stored login                                                            |
+| `CURSOR_RELAY_WORKSPACE_ROOTS`                 | 空                    | `path.delimiter` 分隔的无人值守允许根目录；为空时仍可使用当前对话的精确工作区读写授权                  |
+| `CURSOR_RELAY_STATE_DIR`                       | `~/.cursor-relay-mcp` | Relay 与 Cursor SDK 持久状态目录                                                                       |
+| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`              | `1800000`             | 默认总运行超时                                                                                         |
+| `CURSOR_RELAY_MAX_TIMEOUT_MS`                  | `14400000`            | 允许的最大总超时                                                                                       |
+| `CURSOR_RELAY_MAX_EVENTS`                      | `1000`                | 每个运行保留的最大事件数                                                                               |
+| `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS`       | `false`               | 服务端危险权限总开关；仅接受严格的 `true`/`false`                                                      |
+| `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED`       | 平台自适应            | 只读预设是否启用 SDK 沙箱；Windows 因当前 SDK 不兼容而强制为 `false`，其他平台默认 `true` 且可显式关闭 |
+| `CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED` | 平台自适应            | 读写预设是否启用 SDK 沙箱；Windows 因当前 SDK 不兼容而强制为 `false`，其他平台默认 `true` 且可显式关闭 |
+| `CURSOR_RELAY_SETTING_SOURCES`                 | `project`             | 逗号分隔的设置层，仅允许 `project`、`team`、`mdm`                                                      |
 
 所有已设置的数字和布尔配置必须合法，否则服务启动失败；不会静默回退。默认超时不能大于最大超时。
 
@@ -80,29 +81,67 @@ node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.l
 
 上述配置默认使用执行 `Cursor.auth.login()` 的同一操作系统用户所保存的官方 stored login，因此不需要在 MCP 配置中放置 Key。只有明确选择环境 Key 方案时，才由启动 MCP 客户端的父进程提供 `CURSOR_API_KEY`。
 
+### Codex 插件的内置 MCP 必须这样写
+
+Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 只引用随包分发的 `.mcp.json`：
+
+```json
+{
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
+```
+
+仓库根目录的 `.mcp.json` 使用插件内相对路径：
+
+```json
+{
+  "mcpServers": {
+    "cursor-relay-mcp": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "cwd": "."
+    }
+  }
+}
+```
+
+`cwd: "."` 由 Codex 解析为已安装插件的版本缓存根目录，因此这里不能写开发机的绝对仓库路径，也不能写 `%USERPROFILE%\.codex\plugins\cache\...` 这种会随版本变化的缓存路径。不要再给 Codex 手工添加第二份同名 MCP 配置，否则可能同时启动两个 Relay 进程并读写同一状态目录。不要把 `CURSOR_API_KEY` 写进 `.mcp.json`；内置 MCP 使用启动 Codex 的同一操作系统用户的 Cursor stored login。
+
+安装或重装后必须新建 Codex 任务。Codex 会从 manifest 加载 Skill，并从 `.mcp.json` 启动 MCP；界面里的工具名可能带规范化前缀，但逻辑工具仍是 `doctor`、`list_models`、`authorize_workspace`、`start_run` 和 `wait_run`。正确链路是：
+
+```text
+用户点名 Cursor/模型和工作区
+  → Codex 调用内置 MCP（只传 workspace、任务、模型、权限和幂等键）
+  → Cursor Agent 在该工作区内自行读取或修改
+  → Codex 循环 wait_run、增量读取 read_events、跟踪变更文件并核验结果
+```
+
+Codex 不应把源码正文复制到 MCP 参数中。用户明确要求 Cursor 审查当前或指定工作区，表示允许 Cursor 在该范围内自行读取；用户明确说“让 Cursor 修改/修复/实现”时，表示允许 Cursor 在该精确工作区内自行读写，应选择 `workspace-write`，不能擅自降成只读分析。白名单外由 `authorize_workspace` 签发当前对话可复用的 capability；Codex 后续只需传工作区、任务、模型、匹配的权限、幂等键和同一 token，让 Cursor 自行完成多轮修改。
+
 ## 工具合约
 
-| 工具                  | 用途                                                          |
-| --------------------- | ------------------------------------------------------------- |
-| `doctor`              | 检查认证、状态目录和工作区白名单，不请求模型                  |
-| `list_models`         | 发现当前账户可用模型和参数                                    |
-| `authorize_workspace` | 为当前对话的精确任务签发五分钟、一次性、只读工作区 capability |
-| `start_run`           | 启动模型明确、权限明确且有幂等键的运行                        |
-| `reply_run`           | 续接已结束的 Agent 会话                                       |
-| `get_run`             | 读取状态并在重启后重连                                        |
-| `wait_run`            | 最多等待 30 秒，直到 `terminal=true`                          |
-| `cancel_run`          | 取消运行                                                      |
-| `list_runs`           | 查看持久运行                                                  |
-| `read_events`         | 增量读取有限流事件                                            |
+| 工具                  | 用途                                                    |
+| --------------------- | ------------------------------------------------------- |
+| `doctor`              | 检查认证、状态目录和工作区白名单，不请求模型            |
+| `list_models`         | 发现当前账户可用模型和参数                              |
+| `authorize_workspace` | 为当前对话和精确工作区签发可复用的只读或读写 capability |
+| `start_run`           | 启动模型明确、权限明确且有幂等键的运行                  |
+| `reply_run`           | 续接已结束的 Agent 会话                                 |
+| `get_run`             | 读取状态并在重启后重连                                  |
+| `wait_run`            | 最多等待 30 秒，直到 `terminal=true`                    |
+| `cancel_run`          | 取消运行                                                |
+| `list_runs`           | 查看持久运行                                            |
+| `read_events`         | 增量读取有限流事件                                      |
 
-静态白名单内的推荐调用顺序：`doctor` → `list_models` → `start_run` → 重复 `wait_run` → 验证 `assistantText`。静态白名单外，仅当用户在当前对话明确要求 Cursor Relay 使用该工作区时，在 `start_run` 前调用 `authorize_workspace`，并原样复用 workspace、task、idempotencyKey 和返回的 `workspaceApprovalToken`。
+静态白名单内的推荐调用顺序：`doctor` → `list_models` → `start_run` → 重复 `wait_run` → 验证 `assistantText`。静态白名单外，仅当用户在当前对话明确要求 Cursor Relay 使用该工作区时调用一次 `authorize_workspace`，后续在同一对话、同一工作区的多次 `start_run` / `reply_run` 中复用返回的 `workspaceApprovalToken`；每个新运行仍使用独立任务文本和幂等键。
 
-一次性 capability 不持久化令牌，只在 MCP 进程内保存其 SHA-256 摘要；五分钟后过期，成功创建一个新运行后立即消费，并绑定规范化真实路径、完整任务文本、幂等键与 MCP task/session（可用时）。运行状态只持久化授权 ID、来源和时间作为审计证据。它只能授予 `read-only`；`workspace-write` 与 `danger-full-access` 仍必须命中静态白名单，危险权限继续执行服务端总开关与请求二次确认。
+对话级 capability 不持久化令牌，只在 MCP 进程内保存其 SHA-256 摘要，并绑定规范化真实路径、权限上限与 MCP task/session（可用时）；作用域或进程结束后立即失效。运行状态只持久化授权 ID、来源和时间作为审计证据。`workspace-write` capability 可用于同一工作区的读写或只读运行，只读 capability 不能提权；`danger-full-access` 仍必须命中静态白名单，并继续执行服务端总开关与请求二次确认。
 
 ### 权限预设
 
 - `read-only`（默认）：只开放 `read`、`grep`、`glob`、`ls`，Auto-review 开启。支持的非 Windows 主机默认启用沙箱并可显式关闭；Windows 因当前 Cursor SDK 本地运行时不支持而强制关闭，避免遗留环境变量重新进入不兼容路径。工具白名单始终保持不变。
-- `workspace-write`：沙箱和 Auto-review 开启，并禁止删除、子代理、MCP、联网和图片生成能力。
+- `workspace-write`：Auto-review 开启，并禁止删除、子代理、MCP、联网和图片生成能力；支持的非 Windows 主机默认启用沙箱，Windows 因当前 SDK 不兼容而关闭沙箱。
 - `danger-full-access`：关闭沙箱和 Auto-review；必须由服务启动环境显式设置 `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true`，请求还必须传 `confirmedDangerousPermission=true`。默认关闭。
 
 Relay 默认只把 `project` 作为 Cursor 设置来源。可显式加入 `team`、`mdm`；拒绝 `user`、`plugins`、`all`，以降低环境漂移、嵌套 MCP 和递归委派风险。

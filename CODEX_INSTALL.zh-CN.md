@@ -39,9 +39,10 @@
 5. 使用 Codex 的 plugin-creator 规范注册到默认 personal marketplace，不手改 marketplace.json；确认 source.path 为 ./plugins/cursor-relay-mcp。
 6. 如果 WindowsApps 中的 codex.exe 拒绝访问，检查并使用 %USERPROFILE%\.codex\plugins\.plugin-appserver\codex.exe。
 7. 执行 codex plugin add cursor-relay-mcp@personal，并确认 plugin list 显示 installed, enabled。
-8. 调用 doctor 和 list_models。Windows 强制关闭当前 SDK 不支持的 local sandbox，即使遗留环境变量为 true 也会钳制为 false，但始终保留 Relay 的只读工具白名单；其他平台只有在 SDK 明确报告不支持时才显式设置 CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED=false。
+8. 调用 doctor 和 list_models。Windows 强制关闭当前 SDK 不支持的 local sandbox，即使遗留环境变量为 true 也会钳制为 false，但始终保留 Relay 的权限预设与工具限制；其他平台只有在 SDK 明确报告不支持时才显式关闭对应的 read-only 或 workspace-write sandbox。
 9. 新建任务后，按 doctor → list_models → authorize_workspace（如需要）→ start_run → 重复 wait_run 的顺序，用账户实际返回的 grok-4.6 canonical ID 完成一次只读测试。
-10. 不写入 CURSOR_API_KEY，不提交 node_modules、dist、状态文件或本地凭据。
+10. 核对插件 manifest 使用 "mcpServers": "./.mcp.json"，且内置 .mcp.json 以 cwd "." 启动 node ./dist/index.js；不要把开发机绝对路径或 Codex 版本缓存路径写进去，也不要在用户 config.toml 重复注册同名 MCP。
+11. 不写入 CURSOR_API_KEY，不提交 node_modules、dist、状态文件或本地凭据。
 ```
 
 ## 一、安装前检查
@@ -234,9 +235,38 @@ cursor-relay-mcp@personal    installed, enabled
 
 不要把“marketplace 中可见”误认为“已安装”。必须同时确认 `installed, enabled` 和缓存目录存在。
 
+### Codex 内置 MCP 生成模板
+
+生成或复核 Codex 插件时，`.codex-plugin/plugin.json` 必须引用包内 MCP 声明：
+
+```json
+{
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
+```
+
+仓库根目录 `.mcp.json` 的入口必须保持为插件相对路径：
+
+```json
+{
+  "mcpServers": {
+    "cursor-relay-mcp": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "cwd": "."
+    }
+  }
+}
+```
+
+Codex 会把 `cwd: "."` 解析为已安装版本的插件根目录。不要写开发仓库绝对路径，不要写 `%USERPROFILE%\.codex\plugins\cache\personal\cursor-relay-mcp\<version>`，也不要在用户 `config.toml` 再注册同名 MCP；这些做法会造成升级后入口失效或双进程争用状态文件。内置 MCP 使用当前 Windows 用户的 Cursor stored login，`.mcp.json` 不应包含 `CURSOR_API_KEY`。
+
+插件生效后的语义也必须写进生成提示词：Codex 只传 workspace、任务、模型、权限、幂等键和必要的对话授权 token，Cursor Agent 在授权工作区内自行读取或修改源码。明确审核请求使用 `read-only`；明确修改、修复、实现或重构请求使用 `workspace-write`，不能静默降级成分析。写任务提示应要求 Cursor 直接实施、执行相称验证，并报告每个修改文件及用途；Codex 通过 `wait_run`、`read_events` 和本地变更清单了解进度，不向 Cursor 复制源码。白名单外工作区由 `authorize_workspace` 签发绑定当前对话和精确工作区的可复用 capability，同一对话内多次修改无需重复授权。
+
 ## 八、处理本机不支持 SDK sandbox
 
-插件采用平台兼容的安全保护：Windows 强制关闭当前 SDK 不支持的 local sandbox，其他平台默认开启。两种情况下 Relay 的 `read-only` 预设都只开放 `read`、`grep`、`glob` 和 `ls`。插件升级或重装后必须新建 Codex 任务，因为已存在任务绑定的 MCP 子进程不会热加载新构建；在新任务调用 `doctor`，确认 `readOnlySandboxEnabled` 与平台预期一致。
+插件采用平台兼容的安全保护：Windows 强制关闭当前 SDK 不支持的 local sandbox，其他平台默认开启。两种情况下 Relay 的 `read-only` 预设都只开放 `read`、`grep`、`glob` 和 `ls`，`workspace-write` 仍禁止删除、子代理、MCP、联网和图片生成工具。插件升级或重装后必须新建 Codex 任务，因为已存在任务绑定的 MCP 子进程不会热加载新构建；在新任务调用 `doctor`，确认 `readOnlySandboxEnabled`、`workspaceWriteSandboxEnabled` 与平台预期一致。
 
 若非 Windows 主机出现类似错误，再显式启用兼容开关：
 
@@ -252,17 +282,27 @@ Local SDK sandboxing was requested, but sandboxing is not supported in this envi
   'false',
   'User'
 )
+[Environment]::SetEnvironmentVariable(
+  'CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED',
+  'false',
+  'User'
+)
 ```
 
 然后完全退出并重新打开 Codex。仅新进程会继承用户环境变量。
 
-这个开关只关闭 Cursor SDK 的本地 sandbox；Relay 的 `read-only` 预设仍只允许 `read`、`grep`、`glob` 和 `ls`。不要因为一个只读测试失败就启用 `danger-full-access`。
+这些开关只关闭 Cursor SDK 的本地 sandbox；Relay 的 `read-only` 预设仍只允许 `read`、`grep`、`glob` 和 `ls`，`workspace-write` 仍应用禁止工具列表。不要因为 sandbox 失败就启用 `danger-full-access`。
 
 如果本机支持 SDK sandbox，保留非 Windows 默认值 `true` 更安全。撤销显式覆盖：
 
 ```powershell
 [Environment]::SetEnvironmentVariable(
   'CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED',
+  $null,
+  'User'
+)
+[Environment]::SetEnvironmentVariable(
+  'CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED',
   $null,
   'User'
 )
@@ -278,7 +318,7 @@ Local SDK sandboxing was requested, but sandboxing is not supported in this envi
 使用 Cursor Relay 做一次只读冒烟测试：
 1. 调用 doctor；
 2. 调用 list_models，确认账户实际返回的 Grok 4.6 canonical ID；
-3. 对当前工作区签发一次性 read-only 授权（如工作区不在静态白名单）；
+3. 对当前工作区签发当前对话可复用的 read-only 授权（如工作区不在静态白名单）；
 4. 使用 Grok 4.6 读取 package.json，只回复 package name 和锁定的 @cursor/sdk 版本；
 5. 重复调用 wait_run，直到 terminal=true；
 6. 返回 effectiveModel.id、status 和 assistantText，禁止修改任何文件。
@@ -318,9 +358,9 @@ doctor → list_models → authorize_workspace（按需）→ start_run → wait
 
 避坑：
 
-- `authorize_workspace` 的 token 五分钟有效且只能消费一次。
-- `workspace`、完整 `task` 文本和 `idempotencyKey` 必须在授权与 `start_run` 间完全一致。
-- 一次性授权只允许 `read-only`；写权限必须命中静态工作区白名单。
+- `authorize_workspace` 的 token 绑定当前 MCP task/session 与规范化工作区，可在本对话的多次运行中复用，作用域或 MCP 进程结束后失效。
+- `workspace-write` capability 同时允许读写与只读运行；`read-only` capability 不能提升为写入。
+- 每次 `start_run` / `reply_run` 仍需使用具体任务和独立幂等键；Codex 不复制源码，只跟踪事件和变更文件清单。
 - `wait_run` 最多等待 30 秒；当 `mustCallAgain=true` 时必须继续调用，不能把一次超时当成运行失败。
 - 重试同一个逻辑请求必须复用原 `idempotencyKey`；不同任务必须使用新键。
 - 不要把授权 token 或任何密钥写入日志、状态说明或仓库。
@@ -359,8 +399,8 @@ cachebuster 是本地重装标识，不应叠加多个后缀，也不应为了�
 | `CURSOR_CONFIGURATION_ERROR` 提到 sandbox unsupported | 旧版插件仍在 Windows 强制启用 sandbox，或非 Windows 主机不支持                        | 更新并重装插件；非 Windows 仅为只读模式设置兼容环境变量         |
 | 安装后当前任务没有工具                                | 插件工具只在任务创建时加载                                                            | 新建 Codex 任务                                                 |
 | 再次安装仍运行旧内容                                  | manifest version 未变化，命中旧缓存                                                   | 使用单一 cachebuster 后缀重装                                   |
-| `WORKSPACE_APPROVAL_REQUIRED`                         | 工作区不在静态白名单且未签发一次性授权                                                | 当前对话明确授权后调用 `authorize_workspace`                    |
-| `WORKSPACE_APPROVAL_MISMATCH`                         | 路径、任务、幂等键或 MCP scope 不一致                                                 | 原样复用授权参数并立即启动                                      |
+| `WORKSPACE_APPROVAL_REQUIRED`                         | 工作区不在静态白名单且当前对话尚未签发 capability                                     | 当前对话明确授权后调用 `authorize_workspace`                    |
+| `WORKSPACE_APPROVAL_MISMATCH`                         | 工作区、权限上限或 MCP 对话 scope 不一致                                              | 使用本对话为该精确工作区签发的匹配 token                        |
 | `wait_run` 返回 `terminal=false`                      | 运行尚未结束，不是失败                                                                | 按 `mustCallAgain` 继续轮询                                     |
 | stored login 存在但仍认证失败                         | MCP 由不同 Windows 用户启动，或传了空 `CURSOR_API_KEY`                                | 使用同一用户并完全省略空 Key                                    |
 | `STATE_UPDATE_FAILED` 且系统码为 `EPERM/EACCES/EBUSY` | 旧版 Relay 单次原子替换失败，或目标状态文件被同步软件、杀毒软件等长时间占用           | 更新并重装插件；把状态目录放在本地非同步磁盘，再新建 Codex 任务 |

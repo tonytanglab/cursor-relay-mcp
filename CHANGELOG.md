@@ -2,6 +2,8 @@
 
 ## 0.1.0
 
+- 2026-08-27 15:27：将白名单外交互授权从“五分钟一次性只读”升级为绑定当前 MCP 对话与规范化工作区的可复用 capability，支持同一对话内多次 `start_run` / `reply_run` 读写；写授权可降级只读、只读授权不可提权，跨对话及 `danger-full-access` 继续拒绝，令牌仍不落盘且随作用域或进程结束失效。同步让 Windows 的 `workspace-write` 采用 SDK sandbox 兼容钳制，并更新 Codex Skill/默认提示，要求 Cursor 自行读取和修改工作区、报告变更文件，Codex 通过 `wait_run`、`read_events` 与本地变更清单跟踪和复核进度。
+- 2026-08-27 14:26：补充 Codex 插件内置 MCP 生成与调用说明，明确 manifest 通过 `mcpServers` 引用包内 `.mcp.json`、相对 `cwd` 和入口解析规则，禁止硬编码版本缓存或重复注册同名 MCP；Skill 同步区分“Cursor 自行读取工作区”与“Codex 上传源码”，并把明确实施请求映射为 `workspace-write`，对白名单外现行限制给出准确错误语义。
 - 2026-08-27 00:49：修复 Windows 状态文件原子替换遇到 `EPERM/EACCES/EBUSY` 时导致运行悬挂的问题：新增覆盖完整读改写事务的跨进程锁、活进程保护与 ABA 安全的陈旧锁回收、原子替换有界退避、临时文件清理，以及读写/锁错误的结构化分类和确定性并发回归测试。
 - 2026-08-26 19:11：将 Windows 只读 SDK 沙箱保护从平台默认值升级为强制兼容钳制，即使遗留环境显式设置为 `true` 也不会再进入当前 Cursor SDK 不支持的本地沙箱路径；非 Windows 平台仍可显式关闭沙箱。
 - 2026-08-26 18:55：修复 Windows 上 Cursor SDK 本地沙箱不受支持却仍被默认强制启用的问题；只读预设改为平台自适应沙箱默认值，Windows 关闭 SDK 沙箱但继续锁定 `read`、`grep`、`glob`、`ls` 工具白名单，并保留显式环境覆盖。

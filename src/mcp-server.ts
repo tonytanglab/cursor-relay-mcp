@@ -44,17 +44,15 @@ export function createMcpServer(service: RelayService): McpServer {
     "authorize_workspace",
     {
       description:
-        "仅当用户在当前对话明确要求 Cursor Relay 使用该工作区时调用。为一个精确任务和幂等键签发五分钟有效、一次性、只读的工作区授权；不授予写入或危险权限。",
+        "仅当用户在当前对话明确要求 Cursor Relay 读取或修改该工作区时调用。签发绑定当前 MCP 对话与精确工作区的可复用授权；支持 read-only 与 workspace-write，不授予危险权限，进程结束即失效。",
       inputSchema: {
         workspace: z.string().min(1),
-        task: z.string().min(1),
-        permission: z.literal("read-only").optional(),
-        idempotencyKey: z.string().min(8).max(200),
+        permission: z.enum(["read-only", "workspace-write"]).optional(),
       },
       annotations: approvalAnnotations(),
     },
     guarded(async (input, extra) =>
-      service.authorizeWorkspaceOnce(input, callerScope(extra)),
+      service.authorizeConversationWorkspace(input, callerScope(extra)),
     ),
   );
 
@@ -62,7 +60,7 @@ export function createMcpServer(service: RelayService): McpServer {
     "start_run",
     {
       description:
-        "在允许的本地工作区启动持久 Cursor Agent 运行。默认只读；必须显式选择模型和幂等键。",
+        "在允许的本地工作区启动持久 Cursor Agent 运行。默认只读；修改任务使用 workspace-write，并要求 Cursor 自行检查工作区、直接修改、验证并报告变更文件；必须显式选择模型和幂等键。",
       inputSchema: {
         workspace: z.string().min(1),
         task: z.string().min(1),

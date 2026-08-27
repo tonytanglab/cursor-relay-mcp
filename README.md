@@ -6,6 +6,26 @@ A local MCP server built on the official `@cursor/sdk`. It lets MCP clients dele
 
 For a tested Codex Desktop installation workflow on Windows, including personal marketplace layout, CLI fallback, sandbox compatibility, cache refresh, and a Grok 4.6 smoke test, see [CODEX_INSTALL.zh-CN.md](./CODEX_INSTALL.zh-CN.md).
 
+## Codex built-in MCP contract
+
+The Codex plugin manifest references the packaged MCP declaration with
+`"mcpServers": "./.mcp.json"`. The packaged `.mcp.json` must start
+`node ./dist/index.js` with `cwd: "."`. Codex resolves that working directory
+against the installed plugin version root. Do not hard-code a development checkout
+or a versioned Codex cache path, duplicate the same server in user `config.toml`, or
+put `CURSOR_API_KEY` in the MCP declaration.
+
+After installing or reinstalling the plugin, create a new Codex task. Codex loads
+the bundled Skill and starts the built-in MCP automatically. It sends only the
+workspace path, task, model, permission, and idempotency data; the Cursor Agent
+reads the authorized workspace itself, so callers should not embed source files in
+MCP arguments. An explicit request for Cursor to review a current or named
+workspace authorizes in-scope reading, not secrets, unrelated paths, or edits. An
+explicit request to modify or fix must map to `workspace-write`, not be silently
+downgraded to analysis. Outside the static allowlist, `authorize_workspace`
+issues a reusable capability bound to the current Codex conversation and exact
+workspace; it supports both `read-only` and `workspace-write`.
+
 ## Quick start
 
 Requirements: Git, Node.js `>=22.13`, and a Cursor account. The recommended
@@ -43,15 +63,16 @@ The normal tool flow is `doctor` → `list_models` → `start_run` → repeated 
 
 Security defaults are fail-closed: unattended runs require the static workspace
 allowlist. When a user explicitly authorizes Cursor Relay for a workspace in the
-current conversation, `authorize_workspace` can issue a five-minute, single-use,
-exact-task capability for `read-only` only. The token is never persisted and is
-bound to the real path, task, idempotency key, and MCP task/session when available.
+current conversation, `authorize_workspace` can issue a reusable read-only or
+workspace-write capability. The token is never persisted and is bound to the
+real path, granted permission ceiling, and MCP task/session when available. A
+workspace-write capability can also run read-only tasks; a read-only capability
+cannot be elevated. It expires when that conversation scope or MCP process ends.
 Permissions otherwise default to read-only, the Cursor sandbox is enabled by
 default on supported non-Windows hosts, and only project settings are loaded.
 Windows defaults the SDK sandbox off because the current local runtime reports
 it as unsupported; the read-only tool allowlist remains enforced.
-`workspace-write` still requires the static
-allowlist. `danger-full-access` requires both
+`danger-full-access` still requires the static allowlist plus both
 `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true` at server startup and
 `confirmedDangerousPermission=true` on the request. Leave the server switch off
 for normal use.
@@ -61,7 +82,9 @@ supported non-Windows hosts. Windows always clamps this setting off because the
 current Cursor SDK local runtime does not support that sandbox path. This switch
 applies only to the `read-only` preset; its public tool allowlist remains
 restricted to `read`, `grep`, `glob`, and `ls`.
-`workspace-write` still requires SDK sandbox support.
+The workspace-write sandbox follows the same platform compatibility rule: it is
+enabled by default on supported non-Windows hosts and clamped off on Windows,
+while the exact workspace authorization and disallowed-tool list remain enforced.
 
 `CURSOR_RELAY_SETTING_SOURCES` is an optional comma-separated list restricted
 to the public `project`, `team`, and `mdm` setting layers. It defaults to

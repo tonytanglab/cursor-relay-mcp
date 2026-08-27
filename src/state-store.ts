@@ -469,7 +469,11 @@ const relayRun = z.object({
   permission: z.enum(["read-only", "workspace-write", "danger-full-access"]),
   workspaceAuthorization: z
     .object({
-      source: z.enum(["static-allowlist", "interactive-once"]),
+      source: z.enum([
+        "static-allowlist",
+        "conversation-capability",
+        "interactive-once",
+      ]),
       approvalId: z.string().min(1).optional(),
       authorizedAt: isoDate.optional(),
     })

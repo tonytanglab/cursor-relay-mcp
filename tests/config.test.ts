@@ -40,6 +40,11 @@ test("permission presets fail closed", () => {
     permissionOptions("read-only", false, false, false).sandboxEnabled,
     false,
   );
+  assert.equal(
+    permissionOptions("workspace-write", false, false, true, false)
+      .sandboxEnabled,
+    false,
+  );
   assert.throws(
     () => permissionOptions("danger-full-access", true),
     (error: unknown) =>
@@ -62,6 +67,10 @@ test("config does not infer workspace roots", () => {
   assert.equal(config.defaultTimeoutMs, 1234);
   assert.equal(config.dangerFullAccessEnabled, false);
   assert.equal(config.readOnlySandboxEnabled, process.platform !== "win32");
+  assert.equal(
+    config.workspaceWriteSandboxEnabled,
+    process.platform !== "win32",
+  );
   assert.equal(config.environmentApiKeyConfigured, false);
   assert.deepEqual(config.settingSources, ["project"]);
 });
@@ -75,6 +84,19 @@ test("read-only sandbox is clamped off on Windows and configurable elsewhere", (
   assert.equal(
     loadConfig({ CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED: "false" })
       .readOnlySandboxEnabled,
+    false,
+  );
+});
+
+test("workspace-write sandbox is clamped off on Windows and configurable elsewhere", () => {
+  assert.equal(
+    loadConfig({ CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED: "true" })
+      .workspaceWriteSandboxEnabled,
+    process.platform !== "win32",
+  );
+  assert.equal(
+    loadConfig({ CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED: "false" })
+      .workspaceWriteSandboxEnabled,
     false,
   );
 });
@@ -93,6 +115,10 @@ test("configuration fails fast for invalid booleans, numbers and setting sources
   );
   assert.throws(
     () => loadConfig({ CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED: "yes" }),
+    /只能是 true 或 false/u,
+  );
+  assert.throws(
+    () => loadConfig({ CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED: "yes" }),
     /只能是 true 或 false/u,
   );
   assert.throws(

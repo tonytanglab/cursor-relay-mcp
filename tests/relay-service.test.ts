@@ -160,6 +160,7 @@ async function fixture() {
     maxEventsPerRun: 10,
     dangerFullAccessEnabled: false,
     readOnlySandboxEnabled: true,
+    workspaceWriteSandboxEnabled: true,
     settingSources: ["project"],
   };
   const store = new StateStore(config.stateDir);
@@ -231,20 +232,19 @@ test("model validation, permission mapping, idempotency and wait contract", asyn
   }
 });
 
-test("explicit conversation approval grants one exact read-only run outside static roots", async () => {
+test("explicit conversation approval grants reusable read/write access outside static roots", async () => {
   const item = await fixture();
   const outside = await mkdtemp(join(tmpdir(), "cursor-relay-approved-"));
-  const task = "评估 PackCAD CLI/MCP";
-  const idempotencyKey = "packcad-readonly-review";
   const callerScope = "task:current-conversation";
   try {
     await assert.rejects(
       item.service.startRun(
         {
           workspace: outside,
-          task,
+          task: "修改 PackCAD CLI/MCP",
           model: { id: "cursor-test" },
-          idempotencyKey,
+          permission: "workspace-write",
+          idempotencyKey: "packcad-write-without-approval",
         },
         callerScope,
       ),
@@ -253,12 +253,10 @@ test("explicit conversation approval grants one exact read-only run outside stat
         error.code === "WORKSPACE_APPROVAL_REQUIRED",
     );
     await assert.rejects(
-      item.service.authorizeWorkspaceOnce(
+      item.service.authorizeConversationWorkspace(
         {
           workspace: outside,
-          task,
-          idempotencyKey,
-          permission: "workspace-write",
+          permission: "danger-full-access",
         },
         callerScope,
       ),
@@ -267,21 +265,47 @@ test("explicit conversation approval grants one exact read-only run outside stat
         error.code === "WORKSPACE_APPROVAL_PERMISSION_DENIED",
     );
 
-    const grant = await item.service.authorizeWorkspaceOnce(
-      { workspace: outside, task, idempotencyKey },
+    const readGrant = await item.service.authorizeConversationWorkspace(
+      { workspace: outside },
+      callerScope,
+    );
+    assert.equal(readGrant.authorizationRequired, true);
+    assert.ok("token" in readGrant && readGrant.token);
+
+    await assert.rejects(
+      item.service.startRun(
+        {
+          workspace: outside,
+          task: "只读授权不得升级为写入",
+          model: { id: "cursor-test" },
+          permission: "workspace-write",
+          idempotencyKey: "packcad-read-token-write-attempt",
+          workspaceApprovalToken:
+            "token" in readGrant ? readGrant.token : undefined,
+        },
+        callerScope,
+      ),
+      (error: unknown) =>
+        error instanceof RelayError &&
+        error.code === "WORKSPACE_APPROVAL_MISMATCH",
+    );
+
+    const grant = await item.service.authorizeConversationWorkspace(
+      { workspace: outside, permission: "workspace-write" },
       callerScope,
     );
     assert.equal(grant.authorizationRequired, true);
-    assert.equal(grant.source, "interactive-once");
+    assert.equal(grant.source, "conversation-capability");
     assert.ok("token" in grant && grant.token);
 
     await assert.rejects(
       item.service.startRun(
         {
           workspace: outside,
-          task,
+          task: "不同对话不能复用",
           model: { id: "cursor-test" },
-          idempotencyKey,
+          permission: "workspace-write",
+          idempotencyKey: "packcad-different-conversation",
           workspaceApprovalToken: "token" in grant ? grant.token : undefined,
         },
         "task:different-conversation",
@@ -294,10 +318,11 @@ test("explicit conversation approval grants one exact read-only run outside stat
       item.service.startRun(
         {
           workspace: outside,
-          task,
+          task: "危险权限不能由对话授权获得",
           model: { id: "cursor-test" },
-          idempotencyKey,
-          permission: "workspace-write",
+          idempotencyKey: "packcad-danger-attempt",
+          permission: "danger-full-access",
+          confirmedDangerousPermission: true,
           workspaceApprovalToken: "token" in grant ? grant.token : undefined,
         },
         callerScope,
@@ -309,16 +334,17 @@ test("explicit conversation approval grants one exact read-only run outside stat
     const started = await item.service.startRun(
       {
         workspace: outside,
-        task,
+        task: "第一次修改 PackCAD",
         model: { id: "cursor-test" },
-        idempotencyKey,
+        permission: "workspace-write",
+        idempotencyKey: "packcad-first-write",
         workspaceApprovalToken: "token" in grant ? grant.token : undefined,
       },
       callerScope,
     );
     const authorization = started.run.workspaceAuthorization;
     assert.ok(authorization);
-    assert.equal(authorization.source, "interactive-once");
+    assert.equal(authorization.source, "conversation-capability");
     assert.equal(
       authorization.approvalId,
       "approvalId" in grant ? grant.approvalId : undefined,
@@ -330,20 +356,48 @@ test("explicit conversation approval grants one exact read-only run outside stat
       false,
     );
 
-    const replay = await item.service.startRun(
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "first changed" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+
+    const second = await item.service.replyRun(
       {
-        workspace: outside,
-        task,
-        model: { id: "cursor-test" },
-        idempotencyKey,
+        parentRunId: started.run.relayRunId,
+        task: "第二次修改 PackCAD",
+        permission: "workspace-write",
+        idempotencyKey: "packcad-second-write",
+        workspaceApprovalToken: "token" in grant ? grant.token : undefined,
       },
       callerScope,
     );
-    assert.equal(replay.idempotentReplay, true);
+    assert.equal(second.idempotentReplay, false);
+    assert.equal(second.run.permission, "workspace-write");
+    assert.equal(second.run.agentId, started.run.agentId);
+
+    const review = await item.service.startRun(
+      {
+        workspace: outside,
+        task: "复核两次修改",
+        model: { id: "cursor-test" },
+        permission: "read-only",
+        idempotencyKey: "packcad-review-after-writes",
+        workspaceApprovalToken: "token" in grant ? grant.token : undefined,
+      },
+      callerScope,
+    );
+    assert.equal(review.run.permission, "read-only");
+
     item.sdk.runs
-      .get(started.run.sdkRunId ?? "")
+      .get(second.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "second changed" });
+    item.sdk.runs
+      .get(review.run.sdkRunId ?? "")
       ?.finish({ status: "finished", result: "reviewed" });
-    await item.service.waitRun(started.run.relayRunId, 2_000);
+    await Promise.all([
+      item.service.waitRun(second.run.relayRunId, 2_000),
+      item.service.waitRun(review.run.relayRunId, 2_000),
+    ]);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });

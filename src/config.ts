@@ -13,6 +13,7 @@ export interface RelayConfig {
   maxEventsPerRun: number;
   dangerFullAccessEnabled: boolean;
   readOnlySandboxEnabled: boolean;
+  workspaceWriteSandboxEnabled: boolean;
   settingSources: ("project" | "team" | "mdm")[];
 }
 
@@ -60,6 +61,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
       strictBoolean(
         "CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED",
         env.CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED,
+        true,
+      ) && process.platform !== "win32",
+    workspaceWriteSandboxEnabled:
+      strictBoolean(
+        "CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED",
+        env.CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED,
         true,
       ) && process.platform !== "win32",
     settingSources: parseSettingSources(env.CURSOR_RELAY_SETTING_SOURCES),
@@ -173,6 +180,7 @@ export function permissionOptions(
   confirmedDangerousPermission = false,
   dangerFullAccessEnabled = false,
   readOnlySandboxEnabled = true,
+  workspaceWriteSandboxEnabled = true,
 ) {
   if (permission === "danger-full-access") {
     if (!dangerFullAccessEnabled) {
@@ -206,7 +214,7 @@ export function permissionOptions(
       "webFetch",
       "generateImage",
     ],
-    sandboxEnabled: true,
+    sandboxEnabled: workspaceWriteSandboxEnabled,
     autoReview: true,
   };
 }

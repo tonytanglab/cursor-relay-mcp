@@ -42,7 +42,7 @@ export interface RelayRun {
   model: ModelSelection;
   permission: PermissionPreset;
   workspaceAuthorization?: {
-    source: "static-allowlist" | "interactive-once";
+    source: "static-allowlist" | "conversation-capability" | "interactive-once";
     approvalId?: string | undefined;
     authorizedAt?: string | undefined;
   };
@@ -91,7 +91,5 @@ export interface StartRunInput {
 
 export interface AuthorizeWorkspaceInput {
   workspace: string;
-  task: string;
   permission?: PermissionPreset | undefined;
-  idempotencyKey: string;
 }
