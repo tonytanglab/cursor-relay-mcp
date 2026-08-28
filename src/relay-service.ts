@@ -29,8 +29,11 @@ import type {
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 const MODEL_CACHE_TTL_MS = 60_000;
 const MAX_EVENT_DATA_BYTES = 8 * 1024;
+const MAX_COALESCED_TEXT_BYTES = 6 * 1024;
 const DEADLINE_GRACE_MS = 500;
 const CANCEL_SETTLE_MS = 10_000;
+const CANCEL_REQUEST_GRACE_MS = 1_000;
+const CANCEL_MONITOR_DRAIN_MS = 250;
 
 export class RelayService {
   private readonly monitors = new Map<string, Promise<void>>();
@@ -320,17 +323,19 @@ export class RelayService {
     if (run.sdkRunId) {
       const handle = await this.sdk.getRun(run.sdkRunId, run.workspace);
       try {
-        await handle.cancel();
+        await raceWithDeadline(handle.cancel(), CANCEL_REQUEST_GRACE_MS);
       } catch (error) {
         const current = await this.requireRun(relayRunId);
         if (TERMINAL.has(current.status))
           return { run: summarize(current), alreadyTerminal: true };
         throw error;
+      } finally {
+        await handle.release();
       }
     }
     const applied = await this.patchRun(relayRunId, { status: "cancelled" });
     const monitor = this.monitors.get(relayRunId);
-    if (monitor) await monitor;
+    if (monitor) await raceWithDeadline(monitor, CANCEL_MONITOR_DRAIN_MS);
     return {
       run: summarize(await this.requireRun(relayRunId)),
       alreadyTerminal: !applied,
@@ -421,6 +426,9 @@ export class RelayService {
         }
       } catch (error) {
         const relayError = asRelayError(error, "SDK_RESUME_FAILED");
+        if (relayError.retryable && Date.now() < Date.parse(run.deadlineAt)) {
+          throw relayError;
+        }
         await this.patchRun(run.relayRunId, {
           status: "failed",
           error: relayError.toJSON(),
@@ -513,22 +521,26 @@ export class RelayService {
         await this.finishFromOutcome(relayRunId, grace.outcome);
         return;
       }
+      if (await this.finishFromCurrentResult(relayRunId, handle, true)) return;
       try {
         if (handle.supports("cancel")) await handle.cancel();
       } catch {
         /* The relay timeout remains authoritative. */
       }
+      if (await this.finishFromCurrentResult(relayRunId, handle, false)) return;
       const settled = await raceWithDeadline(
         flow.catch(() => undefined),
         CANCEL_SETTLE_MS,
       );
       if (
         settled.kind === "outcome" &&
-        settled.outcome?.status === "finished"
+        settled.outcome &&
+        settled.outcome.status !== "cancelled"
       ) {
         await this.finishFromOutcome(relayRunId, settled.outcome);
         return;
       }
+      if (await this.finishFromCurrentResult(relayRunId, handle, false)) return;
       await this.patchRun(
         relayRunId,
         {
@@ -542,7 +554,7 @@ export class RelayService {
         ["starting", "running"],
       );
     } finally {
-      if (handle.status !== "running") await handle.release();
+      await handle.release();
     }
   }
 
@@ -569,11 +581,77 @@ export class RelayService {
   }
 
   private async captureEvents(relayRunId: string, handle: CursorRunHandle) {
-    for await (const event of handle.stream())
-      await this.appendEvent(relayRunId, event.type, sanitizeEvent(event));
+    let pending: CoalescedTextEvent | undefined;
+    const emit = async (event: CoalescedTextEvent, text: string) => {
+      await this.appendEvent(
+        relayRunId,
+        event.type,
+        coalescedEventData(event, text),
+      );
+    };
+    const flush = async () => {
+      if (!pending) return;
+      const current = pending;
+      pending = undefined;
+      if (!current.text.trim()) return;
+      await emit(current, current.text);
+    };
+    const flushParagraphs = async () => {
+      while (pending) {
+        const end = firstParagraphEnd(pending.text);
+        if (end < 0) return;
+        const current = pending;
+        const remainder = current.text.slice(end);
+        await emit(current, current.text.slice(0, end));
+        pending = remainder ? { ...current, text: remainder } : undefined;
+      }
+    };
+    const appendText = async (event: CoalescedTextEvent) => {
+      const codePoints = Array.from(event.text);
+      if (!pending || !sameTextStream(pending, event)) {
+        await flush();
+      }
+      if (codePoints.length === 0) return;
+      pending ??= { ...event, text: "" };
+      let offset = 0;
+      while (offset < codePoints.length) {
+        pending ??= { ...event, text: "" };
+        const count = fittingCodePointCount(pending, codePoints, offset);
+        if (count === 0) {
+          if (pending.text) {
+            await flush();
+          } else {
+            throw new RelayError(
+              "SDK_EVENT_TOO_LARGE",
+              "Cursor SDK 文本事件标识超出安全事件上限",
+            );
+          }
+        } else {
+          pending.text += codePoints.slice(offset, offset + count).join("");
+          offset += count;
+          await flushParagraphs();
+          if (offset < codePoints.length) await flush();
+        }
+      }
+    };
+
+    try {
+      for await (const event of handle.stream()) {
+        const textEvent = coalescibleTextEvent(event);
+        if (textEvent) await appendText(textEvent);
+        else {
+          await flush();
+          await this.appendEvent(relayRunId, event.type, sanitizeEvent(event));
+        }
+      }
+    } finally {
+      await flush();
+    }
   }
 
   private async appendEvent(relayRunId: string, type: string, data: unknown) {
+    const current = await this.requireRun(relayRunId);
+    if (TERMINAL.has(current.status)) return;
     const boundedData = boundEventData(data);
     await this.store.update((state) => {
       const run = state.runs[relayRunId];
@@ -601,55 +679,67 @@ export class RelayService {
         /* A missing handle cannot prevent recording the elapsed deadline. */
       }
     }
-    const terminalSnapshot = handle?.currentResult();
-    if (terminalSnapshot) {
-      await this.finishFromOutcome(run.relayRunId, terminalSnapshot);
-      return;
-    }
-    let terminal: Promise<CursorRunResult> | undefined;
-    if (handle?.supports("wait")) {
-      terminal = handle.wait();
-      const grace = await raceWithDeadline(
-        terminal.catch(() => undefined),
-        DEADLINE_GRACE_MS,
-      );
-      if (grace.kind === "outcome" && grace.outcome) {
-        await this.finishFromOutcome(run.relayRunId, grace.outcome);
-        if (handle.currentResult()) await handle.release();
-        return;
-      }
-    }
-    if (handle?.status === "running" && handle.supports("cancel")) {
-      try {
-        await handle.cancel();
-      } catch {
-        /* still record timeout */
-      }
-    }
-    if (terminal) {
-      const settled = await raceWithDeadline(
-        terminal.catch(() => undefined),
-        CANCEL_SETTLE_MS,
-      );
+    try {
       if (
-        settled.kind === "outcome" &&
-        settled.outcome &&
-        settled.outcome.status !== "cancelled"
+        handle &&
+        (await this.finishFromCurrentResult(run.relayRunId, handle, true))
       ) {
-        await this.finishFromOutcome(run.relayRunId, settled.outcome);
-        if (handle?.currentResult()) await handle.release();
         return;
       }
+      let terminal: Promise<CursorRunResult> | undefined;
+      if (handle?.supports("wait")) {
+        terminal = handle.wait();
+        const grace = await raceWithDeadline(
+          terminal.catch(() => undefined),
+          DEADLINE_GRACE_MS,
+        );
+        if (grace.kind === "outcome" && grace.outcome) {
+          await this.finishFromOutcome(run.relayRunId, grace.outcome);
+          return;
+        }
+        if (await this.finishFromCurrentResult(run.relayRunId, handle, true))
+          return;
+      }
+      if (handle?.status === "running" && handle.supports("cancel")) {
+        try {
+          await handle.cancel();
+        } catch {
+          /* still record timeout */
+        }
+        if (await this.finishFromCurrentResult(run.relayRunId, handle, false))
+          return;
+      }
+      if (terminal) {
+        const settled = await raceWithDeadline(
+          terminal.catch(() => undefined),
+          CANCEL_SETTLE_MS,
+        );
+        if (
+          settled.kind === "outcome" &&
+          settled.outcome &&
+          settled.outcome.status !== "cancelled"
+        ) {
+          await this.finishFromOutcome(run.relayRunId, settled.outcome);
+          return;
+        }
+      }
+      if (
+        handle &&
+        (await this.finishFromCurrentResult(run.relayRunId, handle, false))
+      ) {
+        return;
+      }
+      await this.patchRun(run.relayRunId, {
+        status: "failed",
+        error: {
+          code: "RUN_TIMEOUT",
+          message: "Cursor 运行超过总超时",
+          retryable: true,
+        },
+      });
+    } finally {
+      if (handle) await handle.release();
     }
-    if (handle?.currentResult()) await handle.release();
-    await this.patchRun(run.relayRunId, {
-      status: "failed",
-      error: {
-        code: "RUN_TIMEOUT",
-        message: "Cursor 运行超过总超时",
-        retryable: true,
-      },
-    });
   }
 
   private async patchRun(
@@ -695,6 +785,18 @@ export class RelayService {
         },
       });
     }
+  }
+
+  private async finishFromCurrentResult(
+    relayRunId: string,
+    handle: CursorRunHandle,
+    includeCancelled: boolean,
+  ): Promise<boolean> {
+    const outcome = handle.currentResult();
+    if (!outcome || (!includeCancelled && outcome.status === "cancelled"))
+      return false;
+    await this.finishFromOutcome(relayRunId, outcome);
+    return true;
   }
 
   private async requireRun(relayRunId: string): Promise<RelayRun> {
@@ -881,6 +983,138 @@ async function raceWithDeadline<T>(
     if (timer) clearTimeout(timer);
   }
 }
+
+interface CoalescedTextEvent {
+  type: "thinking" | "assistant";
+  agentId: string;
+  runId: string;
+  text: string;
+}
+
+function coalescibleTextEvent(
+  event: CursorEvent,
+): CoalescedTextEvent | undefined {
+  const record = event as Record<string, unknown>;
+  if (
+    typeof record.agent_id !== "string" ||
+    typeof record.run_id !== "string"
+  ) {
+    return undefined;
+  }
+  if (
+    record.type === "thinking" &&
+    typeof record.text === "string" &&
+    hasOnlyKeys(record, ["type", "agent_id", "run_id", "text"])
+  ) {
+    return {
+      type: "thinking",
+      agentId: record.agent_id,
+      runId: record.run_id,
+      text: record.text,
+    };
+  }
+  if (
+    record.type !== "assistant" ||
+    !hasOnlyKeys(record, ["type", "agent_id", "run_id", "message"]) ||
+    !isRecord(record.message) ||
+    record.message.role !== "assistant" ||
+    !hasOnlyKeys(record.message, ["role", "content"]) ||
+    !Array.isArray(record.message.content) ||
+    record.message.content.length === 0 ||
+    !record.message.content.every(
+      (block) =>
+        isRecord(block) &&
+        block.type === "text" &&
+        typeof block.text === "string" &&
+        hasOnlyKeys(block, ["type", "text"]),
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    type: "assistant",
+    agentId: record.agent_id,
+    runId: record.run_id,
+    text: record.message.content
+      .map((block) => (block as { text: string }).text)
+      .join(""),
+  };
+}
+
+function coalescedEventData(event: CoalescedTextEvent, text: string): unknown {
+  const identity = { agent_id: event.agentId, run_id: event.runId };
+  return event.type === "thinking"
+    ? { ...identity, text }
+    : {
+        ...identity,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text }],
+        },
+      };
+}
+
+function sameTextStream(
+  left: CoalescedTextEvent,
+  right: CoalescedTextEvent,
+): boolean {
+  return (
+    left.type === right.type &&
+    left.agentId === right.agentId &&
+    left.runId === right.runId
+  );
+}
+
+function fittingCodePointCount(
+  pending: CoalescedTextEvent,
+  codePoints: string[],
+  offset: number,
+): number {
+  let low = 0;
+  let high = codePoints.length - offset;
+  while (low < high) {
+    const candidate = Math.ceil((low + high) / 2);
+    const text =
+      pending.text + codePoints.slice(offset, offset + candidate).join("");
+    const data = coalescedEventData(pending, text);
+    if (
+      Buffer.byteLength(text, "utf8") <= MAX_COALESCED_TEXT_BYTES &&
+      eventDataBytes(data) <= MAX_EVENT_DATA_BYTES
+    ) {
+      low = candidate;
+    } else {
+      high = candidate - 1;
+    }
+  }
+  return low;
+}
+
+function eventDataBytes(data: unknown): number {
+  return Buffer.byteLength(JSON.stringify({ data }), "utf8");
+}
+
+function firstParagraphEnd(text: string): number {
+  for (const match of text.matchAll(/(?:\r?\n){2,}/gu)) {
+    const end = match.index + match[0].length;
+    if (text.slice(0, match.index).trim() && text.slice(end).trim()) return end;
+  }
+  return -1;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  const keys = Object.keys(value);
+  return (
+    keys.length === allowed.length && keys.every((key) => allowed.includes(key))
+  );
+}
+
 function sanitizeEvent(event: CursorEvent): unknown {
   const copy = structuredClone(event) as Record<string, unknown>;
   delete copy.type;

@@ -33,6 +33,11 @@ class FakeRun implements CursorRunHandle {
   private terminalResult: CursorRunResult | undefined;
   private streamActive = false;
   concurrentWaitObserved = false;
+  cancelDoesNotSettle = false;
+  cancelNeverReturns = false;
+  cancelRejectAfterMs: number | undefined;
+  cancelResultWithoutWait: CursorRunResult | undefined;
+  streamErrorAfterEvents: Error | undefined;
 
   constructor(
     readonly id: string,
@@ -51,6 +56,7 @@ class FakeRun implements CursorRunHandle {
       this.order.push("stream:start");
       yield { type: "status", status: "RUNNING" };
       for (const event of this.initialEvents) yield event;
+      if (this.streamErrorAfterEvents) throw this.streamErrorAfterEvents;
       await this.resultPromise;
       yield { type: "status", status: this.status.toUpperCase() };
     } finally {
@@ -65,11 +71,27 @@ class FakeRun implements CursorRunHandle {
   }
   async cancel() {
     this.cancelled = true;
+    if (this.cancelNeverReturns) await new Promise<void>(() => undefined);
+    if (this.cancelRejectAfterMs !== undefined) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.cancelRejectAfterMs),
+      );
+      throw new Error("late cancel rejection");
+    }
+    if (this.cancelResultWithoutWait) {
+      this.status = this.cancelResultWithoutWait.status;
+      this.terminalResult = this.cancelResultWithoutWait;
+      return;
+    }
+    if (this.cancelDoesNotSettle) return;
     this.finish({ status: "cancelled" });
   }
   finish(result: CursorRunResult) {
     this.status = result.status;
     this.terminalResult = result;
+    this.resolveResult(result);
+  }
+  finishWaitOnly(result: CursorRunResult) {
     this.resolveResult(result);
   }
   fail(error: unknown) {
@@ -102,7 +124,9 @@ class FakeSdk implements CursorSdkPort {
   launches: AgentLaunchOptions[] = [];
   listModelsCalls = 0;
   nextEvents: CursorEvent[] = [];
+  nextStreamError: Error | undefined;
   findRunError: Error | undefined;
+  getRunErrors: Error[] = [];
   authMode:
     | { mode: "environment-api-key" }
     | { mode: "stored-login"; expiresAtMs?: number }
@@ -123,6 +147,8 @@ class FakeSdk implements CursorSdkPort {
     return this.create(options);
   }
   async getRun(runId: string) {
+    const error = this.getRunErrors.shift();
+    if (error) throw error;
     const run = this.runs.get(runId);
     if (!run) throw new Error(`missing fake run ${runId}`);
     return run;
@@ -142,7 +168,9 @@ class FakeSdk implements CursorSdkPort {
       options.agentId,
       this.nextEvents,
     );
+    run.streamErrorAfterEvents = this.nextStreamError;
     this.nextEvents = [];
+    this.nextStreamError = undefined;
     this.runs.set(run.id, run);
     return run;
   }
@@ -426,7 +454,47 @@ test("a new service instance reconnects a persisted SDK run", async () => {
   }
 });
 
-test("total timeout cancels SDK run and persists structured error", async () => {
+test("retryable getRun failure before deadline preserves recovery state", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "retry reconnect",
+      model: { id: "cursor-test" },
+      idempotencyKey: "retryable-reconnect",
+    });
+    item.sdk.getRunErrors.push(
+      new RelayError("CURSOR_NETWORK_ERROR", "temporary outage", {
+        retryable: true,
+      }),
+    );
+    const resumed = new RelayService(item.config, item.store, item.sdk);
+    await assert.rejects(
+      resumed.getRun(started.run.relayRunId),
+      (error: unknown) =>
+        error instanceof RelayError &&
+        error.code === "CURSOR_NETWORK_ERROR" &&
+        error.retryable,
+    );
+    const preserved = await item.store.read();
+    assert.equal(preserved.runs[started.run.relayRunId]?.status, "running");
+    assert.equal(preserved.runs[started.run.relayRunId]?.error, undefined);
+
+    const recovered = await resumed.getRun(started.run.relayRunId);
+    assert.equal(recovered.status, "running");
+    item.sdk.runs.get(started.run.sdkRunId ?? "")?.finish({
+      status: "finished",
+      result: "recovered after retry",
+    });
+    const done = await resumed.waitRun(started.run.relayRunId, 2_000);
+    assert.equal(done.run.status, "succeeded");
+    assert.equal(done.run.assistantText, "recovered after retry");
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("relay-triggered cancellation remains RUN_TIMEOUT after SDK cancelled", async () => {
   const item = await fixture();
   try {
     const started = await item.service.startRun({
@@ -444,6 +512,89 @@ test("total timeout cancels SDK run and persists structured error", async () => 
       true,
     );
     assert.equal(item.sdk.runs.get(started.run.sdkRunId ?? "")?.released, 1);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout releases a still-running handle when cancel and wait never settle", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "unresponsive cancellation",
+      model: { id: "cursor-test" },
+      idempotencyKey: "unresponsive-cancellation",
+      timeoutMs: 1_000,
+    });
+    const sdkRun = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(sdkRun);
+    sdkRun.cancelDoesNotSettle = true;
+
+    const result = await item.service.waitRun(started.run.relayRunId, 15_000);
+    assert.equal(result.run.status, "failed");
+    assert.equal(result.run.error?.code, "RUN_TIMEOUT");
+    assert.equal(sdkRun.status, "running");
+    assert.equal(sdkRun.released, 1);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout preserves finished currentResult when wait remains pending", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "late wait signal",
+      model: { id: "cursor-test" },
+      idempotencyKey: "finished-current-result-pending-wait",
+      timeoutMs: 1_000,
+    });
+    const sdkRun = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(sdkRun);
+    sdkRun.cancelResultWithoutWait = {
+      status: "finished",
+      result: "kept despite pending wait",
+    };
+
+    const result = await item.service.waitRun(started.run.relayRunId, 3_000);
+    assert.equal(result.run.status, "succeeded");
+    assert.equal(result.run.assistantText, "kept despite pending wait");
+    assert.equal(sdkRun.released, 1);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("timeout preserves a late wait error even when currentResult stays stale", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "late error without snapshot",
+      model: { id: "cursor-test" },
+      idempotencyKey: "late-error-stale-current-result",
+      timeoutMs: 1_000,
+    });
+    const sdkRun = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(sdkRun);
+    sdkRun.cancelDoesNotSettle = true;
+    setTimeout(
+      () =>
+        sdkRun.finishWaitOnly({
+          status: "error",
+          error: { code: "LATE_SDK_ERROR", message: "late failure" },
+        }),
+      1_700,
+    );
+
+    const result = await item.service.waitRun(started.run.relayRunId, 3_000);
+    assert.equal(result.run.status, "failed");
+    assert.ok(result.run.error);
+    assert.equal(result.run.error.code, "LATE_SDK_ERROR");
+    assert.equal(result.run.error.message, "late failure");
+    assert.equal(sdkRun.released, 1);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }
@@ -561,6 +712,270 @@ test("model aliases canonicalize, variants augment parameter validation, duplica
       .get(started.run.sdkRunId ?? "")
       ?.finish({ status: "finished", model: started.run.model });
     await item.service.waitRun(started.run.relayRunId, 2_000);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("thinking fragments flush as readable paragraphs while the run is active", async () => {
+  const item = await fixture();
+  try {
+    item.sdk.nextEvents = [
+      { type: "thinking", agent_id: "agent-1", run_id: "run-1", text: "重新" },
+      {
+        type: "thinking",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        text: "评估了\n\n",
+      },
+      {
+        type: "thinking",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        text: "\n\nmonitor()",
+      },
+      { type: "thinking", agent_id: "agent-2", run_id: "run-2", text: "\n\n" },
+    ];
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "paragraph stream",
+      model: { id: "cursor-test" },
+      idempotencyKey: "paragraph-thinking-stream",
+    });
+
+    let activeThinking: { data: unknown } | undefined;
+    for (let attempt = 0; attempt < 100 && !activeThinking; attempt += 1) {
+      const state = await item.store.read();
+      activeThinking = state.runs[started.run.relayRunId]?.events.find(
+        (event) => event.type === "thinking",
+      );
+      if (!activeThinking)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(
+      (activeThinking?.data as { text?: string } | undefined)?.text,
+      "重新评估了\n\n\n\n",
+    );
+
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "done" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+    const events = await item.service.readEvents(started.run.relayRunId);
+    const thinking = events.events.filter((event) => event.type === "thinking");
+    assert.equal(thinking.length, 2);
+    assert.equal(
+      thinking.map((event) => (event.data as { text: string }).text).join(""),
+      "重新评估了\n\n\n\nmonitor()",
+    );
+    assert.ok(
+      thinking.every(
+        (event) => (event.data as { text: string }).text.trim().length > 0,
+      ),
+    );
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("assistant text fragments coalesce without crossing structured boundaries", async () => {
+  const item = await fixture();
+  try {
+    item.sdk.nextEvents = [
+      {
+        type: "assistant",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "正常" }],
+        },
+      },
+      {
+        type: "assistant",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "文字" }],
+        },
+      },
+      {
+        type: "assistant",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "段落" }],
+        },
+      },
+    ];
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "assistant stream",
+      model: { id: "cursor-test" },
+      idempotencyKey: "assistant-text-stream",
+    });
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "done" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+
+    const events = await item.service.readEvents(started.run.relayRunId);
+    const assistant = events.events.filter(
+      (event) => event.type === "assistant",
+    );
+    assert.equal(assistant.length, 1);
+    assert.deepEqual(
+      (assistant[0]?.data as { message?: { content?: unknown } }).message
+        ?.content,
+      [{ type: "text", text: "正常文字段落" }],
+    );
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("text coalescing stops at tools, tool-use assistants and identity changes", async () => {
+  const item = await fixture();
+  try {
+    item.sdk.nextEvents = [
+      { type: "thinking", agent_id: "agent-1", run_id: "run-1", text: "前" },
+      { type: "tool_call", agent_id: "agent-1", run_id: "run-1", name: "read" },
+      { type: "thinking", agent_id: "agent-1", run_id: "run-1", text: "后" },
+      { type: "thinking", agent_id: "agent-1", run_id: "run-2", text: "异" },
+      {
+        type: "assistant",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        message: { role: "assistant", content: [{ type: "text", text: "左" }] },
+      },
+      {
+        type: "assistant",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call-1", name: "read", input: {} },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        message: { role: "assistant", content: [{ type: "text", text: "右" }] },
+      },
+    ];
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "structured boundaries",
+      model: { id: "cursor-test" },
+      idempotencyKey: "structured-stream-boundaries",
+    });
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "done" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+
+    const events = await item.service.readEvents(started.run.relayRunId);
+    assert.deepEqual(
+      events.events
+        .filter((event) => event.type !== "status")
+        .map((event) => event.type),
+      [
+        "thinking",
+        "tool_call",
+        "thinking",
+        "thinking",
+        "assistant",
+        "assistant",
+        "assistant",
+      ],
+    );
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("long UTF-8 text splits safely without falling back to truncation", async () => {
+  const item = await fixture();
+  const text = "汉".repeat(6_000);
+  try {
+    item.sdk.nextEvents = [
+      { type: "thinking", agent_id: "agent-1", run_id: "run-1", text },
+    ];
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "large utf8 stream",
+      model: { id: "cursor-test" },
+      idempotencyKey: "large-utf8-stream",
+    });
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "done" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+
+    const events = await item.service.readEvents(started.run.relayRunId);
+    const thinking = events.events.filter((event) => event.type === "thinking");
+    assert.ok(thinking.length > 1);
+    assert.equal(
+      thinking.map((event) => (event.data as { text: string }).text).join(""),
+      text,
+    );
+    for (const event of thinking) {
+      assert.equal(
+        (event.data as { truncated?: boolean }).truncated,
+        undefined,
+      );
+      assert.equal(JSON.stringify(event.data).includes("�"), false);
+      assert.ok(
+        Buffer.byteLength(JSON.stringify({ data: event.data }), "utf8") <=
+          8_192,
+      );
+    }
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("stream errors flush pending coalesced text before the error event", async () => {
+  const item = await fixture();
+  try {
+    item.sdk.nextEvents = [
+      { type: "thinking", agent_id: "agent-1", run_id: "run-1", text: "异常" },
+      {
+        type: "thinking",
+        agent_id: "agent-1",
+        run_id: "run-1",
+        text: "前保留",
+      },
+    ];
+    item.sdk.nextStreamError = new Error("stream lost");
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "stream error",
+      model: { id: "cursor-test" },
+      idempotencyKey: "stream-error-flush",
+    });
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "done" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+
+    const events = await item.service.readEvents(started.run.relayRunId);
+    const thinkingIndex = events.events.findIndex(
+      (event) => event.type === "thinking",
+    );
+    const errorIndex = events.events.findIndex(
+      (event) => event.type === "stream_error",
+    );
+    assert.ok(thinkingIndex >= 0 && errorIndex > thinkingIndex);
+    assert.equal(
+      (events.events[thinkingIndex]?.data as { text?: string }).text,
+      "异常前保留",
+    );
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }
@@ -731,8 +1146,60 @@ test("explicit cancellation reaches cancelled and releases the owned agent", asy
     await item.service.cancelRun(started.run.relayRunId);
     const terminal = await item.service.waitRun(started.run.relayRunId, 2_000);
     assert.equal(terminal.run.status, "cancelled");
-    assert.equal(item.sdk.runs.get(started.run.sdkRunId ?? "")?.released, 1);
+    assert.equal(item.sdk.runs.get(started.run.sdkRunId ?? "")?.released, 2);
   } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("explicit cancellation returns within a bound when SDK operations never settle", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "cancel unresponsive run",
+      model: { id: "cursor-test" },
+      idempotencyKey: "bounded-explicit-cancel",
+    });
+    const sdkRun = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(sdkRun);
+    sdkRun.cancelNeverReturns = true;
+
+    const before = Date.now();
+    const cancelled = await item.service.cancelRun(started.run.relayRunId);
+    const elapsed = Date.now() - before;
+    assert.equal(cancelled.run.status, "cancelled");
+    assert.ok(elapsed >= 900 && elapsed < 2_000, `cancel took ${elapsed}ms`);
+    assert.equal(sdkRun.released, 1);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("a cancellation rejection after the request bound is still observed", async () => {
+  const item = await fixture();
+  let unhandled: unknown;
+  const captureUnhandled = (reason: unknown) => {
+    unhandled = reason;
+  };
+  process.on("unhandledRejection", captureUnhandled);
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "late cancel rejection",
+      model: { id: "cursor-test" },
+      idempotencyKey: "late-cancel-rejection",
+    });
+    const sdkRun = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(sdkRun);
+    sdkRun.cancelRejectAfterMs = 1_100;
+
+    const cancelled = await item.service.cancelRun(started.run.relayRunId);
+    assert.equal(cancelled.run.status, "cancelled");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(unhandled, undefined);
+  } finally {
+    process.off("unhandledRejection", captureUnhandled);
     await rm(item.dir, { recursive: true, force: true });
   }
 });
@@ -759,9 +1226,9 @@ test("restart after deadline preserves an SDK terminal result before cancelling"
     assert.equal(result.status, "succeeded");
     assert.equal(result.assistantText, "preserved");
     assert.equal(sdkRun.cancelled, false);
-    for (let attempt = 0; attempt < 100 && sdkRun.released === 0; attempt += 1)
+    for (let attempt = 0; attempt < 100 && sdkRun.released < 2; attempt += 1)
       await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(sdkRun.released, 1);
+    assert.equal(sdkRun.released, 2);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }

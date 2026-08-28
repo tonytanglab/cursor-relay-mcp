@@ -19,7 +19,7 @@
       "Conversation-scoped read/write workspace approval"
     ],
     "defaultPrompt": [
-      "Use Cursor Relay with an explicit model and a permission matching the user's request: read-only for review, workspace-write for requested code changes. Let Cursor inspect and edit the authorized workspace itself instead of pasting source into the request. For write runs, follow wait_run and read_events, track modified files, and verify those files locally before reporting completion."
+      "Use Cursor Relay with an explicit model and matching permission; verify local changes before reporting."
     ]
   },
   "mcpServers": "./.mcp.json",
