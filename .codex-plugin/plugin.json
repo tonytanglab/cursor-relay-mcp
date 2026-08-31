@@ -1,6 +1,6 @@
 {
   "name": "cursor-relay-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Durable, model-selected Cursor Agent delegation through MCP.",
   "author": {
     "name": "cursor-relay-mcp contributors"
@@ -16,10 +16,11 @@
       "Cursor model discovery",
       "Durable local agent runs",
       "Restart-safe polling",
+      "Live read-only run panel",
       "Conversation-scoped read/write workspace approval"
     ],
     "defaultPrompt": [
-      "Use Cursor Relay with an explicit model and matching permission; verify local changes before reporting."
+      "Use matching permissions, keep polling long Cursor runs, open view_run for live progress, and verify local changes."
     ]
   },
   "mcpServers": "./.mcp.json",

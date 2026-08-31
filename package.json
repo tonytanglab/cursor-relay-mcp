@@ -1,6 +1,6 @@
 {
   "name": "cursor-relay-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Delegate durable, model-selected coding tasks to Cursor Agent through MCP.",
   "type": "module",
   "main": "./dist/index.js",

@@ -467,6 +467,10 @@ const relayRun = z.object({
   task: z.string().min(1),
   model: modelSelection,
   permission: z.enum(["read-only", "workspace-write", "danger-full-access"]),
+  codexAllowedTools: z
+    .array(z.enum(["delete", "task", "mcp", "generateImage"]))
+    .max(4)
+    .optional(),
   workspaceAuthorization: z
     .object({
       source: z.enum([

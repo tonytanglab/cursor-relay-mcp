@@ -266,7 +266,7 @@ Codex 会把 `cwd: "."` 解析为已安装版本的插件根目录。不要写�
 
 ## 八、处理本机不支持 SDK sandbox
 
-插件采用平台兼容的安全保护：Windows 强制关闭当前 SDK 不支持的 local sandbox，其他平台默认开启。两种情况下 Relay 的 `read-only` 预设都只开放 `read`、`grep`、`glob` 和 `ls`，`workspace-write` 仍禁止删除、子代理、MCP、联网和图片生成工具。插件升级或重装后必须新建 Codex 任务，因为已存在任务绑定的 MCP 子进程不会热加载新构建；在新任务调用 `doctor`，确认 `readOnlySandboxEnabled`、`workspaceWriteSandboxEnabled` 与平台预期一致。
+插件采用平台兼容的安全保护：Windows 强制关闭当前 SDK 不支持的 local sandbox，其他平台默认开启。两种情况下 Relay 的 `read-only` 预设都开放 `read`、`grep`、`glob`、`ls`、`webSearch` 和 `webFetch`；`workspace-write` 默认禁止删除、子代理、MCP 和图片生成等 Codex 控制工具，但保留官方联网工具。插件升级或重装后必须新建 Codex 任务，因为已存在任务绑定的 MCP 子进程不会热加载新构建；在新任务调用 `doctor`，确认 `readOnlySandboxEnabled`、`workspaceWriteSandboxEnabled` 与平台预期一致。
 
 若非 Windows 主机出现类似错误，再显式启用兼容开关：
 
@@ -310,7 +310,7 @@ Local SDK sandboxing was requested, but sandboxing is not supported in this envi
 
 ## 九、新任务中完成 Grok 4.6 冒烟测试
 
-插件安装或重装后必须新建 Codex 任务。旧任务不会动态获得新插件的 skills 和 MCP 工具。
+插件安装或重装后必须新建 Codex 任务。旧任务不会动态获得新插件的 skills、MCP 工具或实时运行面板。新任务中的 `start_run` / `reply_run` 会附带只读进度卡片，也可按 `relayRunId` 调用 `view_run` 随时重开；可重试的 SDK 短暂断连会以 `connection.state=reconnecting` 保持非终态并继续轮询。
 
 在新任务中输入：
 

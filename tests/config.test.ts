@@ -32,7 +32,7 @@ test("workspace allowlist resolves real paths and rejects default", async () => 
 
 test("permission presets fail closed", () => {
   assert.deepEqual(permissionOptions("read-only"), {
-    tools: ["read", "grep", "glob", "ls"],
+    tools: ["read", "grep", "glob", "ls", "webSearch", "webFetch"],
     sandboxEnabled: true,
     autoReview: true,
   });
@@ -59,6 +59,31 @@ test("permission presets fail closed", () => {
     permissionOptions("danger-full-access", true, true).sandboxEnabled,
     false,
   );
+  assert.deepEqual(
+    permissionOptions("workspace-write", false, false, true, true, [
+      "generateImage",
+      "delete",
+      "generateImage",
+    ]).disallowedTools,
+    ["task", "mcp"],
+  );
+  assert.deepEqual(
+    permissionOptions("read-only", false, false, true, true, ["generateImage"])
+      .tools,
+    ["read", "grep", "glob", "ls", "webSearch", "webFetch", "generateImage"],
+  );
+  assert.throws(
+    () => permissionOptions("read-only", false, false, true, true, ["delete"]),
+    (error: unknown) =>
+      error instanceof RelayError &&
+      error.code === "TOOL_POLICY_PERMISSION_DENIED",
+  );
+});
+
+test("default timeout supports multi-hour Cursor runs", () => {
+  const config = loadConfig({});
+  assert.equal(config.defaultTimeoutMs, 2 * 60 * 60_000);
+  assert.equal(config.maxTimeoutMs, 4 * 60 * 60_000);
 });
 
 test("config does not infer workspace roots", () => {

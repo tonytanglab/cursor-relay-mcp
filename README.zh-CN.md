@@ -10,6 +10,7 @@
 - 幂等 `start_run` / `reply_run`，相同键和相同请求返回原运行；不同请求返回结构化冲突。
 - Relay 状态采用原子 UTF-8 JSON，Cursor SDK 状态采用官方 `JsonlLocalAgentStore`；进程重启后可通过 `Agent.getRun` 重连。
 - `wait_run` 每次最多等待 30 秒，未结束时明确返回 `mustCallAgain=true`。
+- `start_run` / `reply_run` 自动附带只读实时面板；也可用 `view_run` 打开既有运行，查看状态、事件时间线和最终输出。
 - 总运行超时、取消、有限事件缓冲、8 KiB 单事件上限、敏感字段名脱敏以及统一结构化错误。
 - 安全默认值：无人值守运行必须命中静态工作区白名单；当前对话明确授权时可为精确工作区签发对话级、可复用的只读或读写 capability；默认只读并只加载项目设置；支持的非 Windows 主机默认启用 Cursor 沙箱，Windows 因当前 SDK 本地运行时不支持而关闭沙箱，但仍强制权限预设和工具限制。
 - SDK Agent 句柄在运行终态后释放；模型、requestId、耗时和 token usage 使用官方公开结果字段持久化。
@@ -51,7 +52,7 @@ node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.l
 | `CURSOR_API_KEY`                               | 无                    | 可选环境 Key；未设置时使用官方 stored login                                                            |
 | `CURSOR_RELAY_WORKSPACE_ROOTS`                 | 空                    | `path.delimiter` 分隔的无人值守允许根目录；为空时仍可使用当前对话的精确工作区读写授权                  |
 | `CURSOR_RELAY_STATE_DIR`                       | `~/.cursor-relay-mcp` | Relay 与 Cursor SDK 持久状态目录                                                                       |
-| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`              | `1800000`             | 默认总运行超时                                                                                         |
+| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`              | `7200000`             | 默认总运行超时                                                                                         |
 | `CURSOR_RELAY_MAX_TIMEOUT_MS`                  | `14400000`            | 允许的最大总超时                                                                                       |
 | `CURSOR_RELAY_MAX_EVENTS`                      | `1000`                | 每个运行保留的最大事件数                                                                               |
 | `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS`       | `false`               | 服务端危险权限总开关；仅接受严格的 `true`/`false`                                                      |
@@ -108,7 +109,9 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 
 `cwd: "."` 由 Codex 解析为已安装插件的版本缓存根目录，因此这里不能写开发机的绝对仓库路径，也不能写 `%USERPROFILE%\.codex\plugins\cache\...` 这种会随版本变化的缓存路径。不要再给 Codex 手工添加第二份同名 MCP 配置，否则可能同时启动两个 Relay 进程并读写同一状态目录。不要把 `CURSOR_API_KEY` 写进 `.mcp.json`；内置 MCP 使用启动 Codex 的同一操作系统用户的 Cursor stored login。
 
-安装或重装后必须新建 Codex 任务。Codex 会从 manifest 加载 Skill，并从 `.mcp.json` 启动 MCP；界面里的工具名可能带规范化前缀，但逻辑工具仍是 `doctor`、`list_models`、`authorize_workspace`、`start_run` 和 `wait_run`。正确链路是：
+安装或重装后必须新建 Codex 任务。Codex 会从 manifest 加载 Skill，并从 `.mcp.json` 启动 MCP；界面里的工具名可能带规范化前缀，`start_run` / `reply_run` 会附带进度卡片，也可随时调用 `view_run` 重开。正确链路是：
+
+本插件的 Codex Skill 已作为原始包内容内置在 `skills/delegate-to-cursor-agent/SKILL.md`。manifest 通过 `"skills": "./skills/"` 声明它，`package.json` 也把整个 `skills/` 纳入发布文件。因此安装或重装插件后，Codex 会在新建任务中自动加载该 Skill，不需要、也不应在安装时动态生成另一份副本。
 
 ```text
 用户点名 Cursor/模型和工作区
@@ -129,6 +132,7 @@ Codex 不应把源码正文复制到 MCP 参数中。用户明确要求 Cursor �
 | `start_run`           | 启动模型明确、权限明确且有幂等键的运行                  |
 | `reply_run`           | 续接已结束的 Agent 会话                                 |
 | `get_run`             | 读取状态并在重启后重连                                  |
+| `view_run`            | 打开只读实时面板查看既有运行                            |
 | `wait_run`            | 最多等待 30 秒，直到 `terminal=true`                    |
 | `cancel_run`          | 取消运行                                                |
 | `list_runs`           | 查看持久运行                                            |
@@ -136,13 +140,23 @@ Codex 不应把源码正文复制到 MCP 参数中。用户明确要求 Cursor �
 
 静态白名单内的推荐调用顺序：`doctor` → `list_models` → `start_run` → 重复 `wait_run` → 验证 `assistantText`。静态白名单外，仅当用户在当前对话明确要求 Cursor Relay 使用该工作区时调用一次 `authorize_workspace`，后续在同一对话、同一工作区的多次 `start_run` / `reply_run` 中复用返回的 `workspaceApprovalToken`；每个新运行仍使用独立任务文本和幂等键。
 
+### 实时面板与运行中纠偏边界
+
+`start_run` 与 `reply_run` 返回结果会绑定同一个 MCP Apps 只读面板；`view_run` 可按 `relayRunId` 再次打开。面板只调用 `wait_run` 和 `read_events`，展示真实 Relay 状态、模型、权限、耗时、Cursor SDK 增量事件、token 使用量、错误和最终输出，不会授权、启动、续接或取消运行。不支持 MCP Apps 的宿主仍可使用原有结构化工具结果。
+
+`doctor` 会返回实际生效的 `defaultTimeoutMs` 与 `maxTimeoutMs`。普通仓库任务应省略 `timeoutMs`，使用配置默认值（默认 2 小时），不应擅自压缩为 10 分钟；预计耗时更长时可在 `maxTimeoutMs` 内显式选择更大预算。单次 `wait_run` 超时只是轮询切片；可重试的 SDK 重连异常会返回 `connection.state=reconnecting` 并保持运行非终态。只要运行状态与事件持续正常推进，就应在总预算内继续等待，不应因已等待 10 分钟而取消或拆成多个短续接运行；真正达到总预算是执行超时，不代表任务推理在语义上失败。
+
+锁定的公开 Cursor SDK 当前没有向正在执行的本地 Agent run 注入新指令的操作；`doctor.capabilities.activeRunSteering` 因此明确为 `false`。Relay 不会把内部事件追加伪装成“纠偏指令已送达”。调用方也不应仅为调整方向就取消活动运行：应继续观察至终态，再用 `reply_run` 续接；只有用户明确要求停止，或继续执行将跨越具体安全边界时才取消。
+
 对话级 capability 不持久化令牌，只在 MCP 进程内保存其 SHA-256 摘要，并绑定规范化真实路径、权限上限与 MCP task/session（可用时）；作用域或进程结束后立即失效。运行状态只持久化授权 ID、来源和时间作为审计证据。`workspace-write` capability 可用于同一工作区的读写或只读运行，只读 capability 不能提权；`danger-full-access` 仍必须命中静态白名单，并继续执行服务端总开关与请求二次确认。
 
 ### 权限预设
 
-- `read-only`（默认）：只开放 `read`、`grep`、`glob`、`ls`，Auto-review 开启。支持的非 Windows 主机默认启用沙箱并可显式关闭；Windows 因当前 Cursor SDK 本地运行时不支持而强制关闭，避免遗留环境变量重新进入不兼容路径。工具白名单始终保持不变。
-- `workspace-write`：Auto-review 开启，并禁止删除、子代理、MCP、联网和图片生成能力；支持的非 Windows 主机默认启用沙箱，Windows 因当前 SDK 不兼容而关闭沙箱。
+- `read-only`（默认）：开放 `read`、`grep`、`glob`、`ls`、`webSearch` 和 `webFetch`，由 Cursor 自行判断是否需要联网；Auto-review 开启。支持的非 Windows 主机默认启用沙箱并可显式关闭；Windows 因当前 Cursor SDK 本地运行时不支持而强制关闭，避免遗留环境变量重新进入不兼容路径。
+- `workspace-write`：Auto-review 开启，并默认禁止 `delete`、`task`、`mcp` 和 `generateImage`；`webSearch`、`webFetch` 正常可用，由 Cursor 自行判断是否需要。支持的非 Windows 主机默认启用沙箱，Windows 因当前 SDK 不兼容而关闭沙箱。
 - `danger-full-access`：关闭沙箱和 Auto-review；必须由服务启动环境显式设置 `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true`，请求还必须传 `confirmedDangerousPermission=true`。默认关闭。
+
+`delete`、`task`、`mcp` 和 `generateImage` 不是绝对禁用项，而是由 Codex 主进程在启动或续接前通过 `codexAllowedTools` 选择性放行，Cursor 无法自行提权。`reply_run` 省略该字段时继承父运行，传 `[]` 可撤销；`read-only` 只兼容额外放行 `generateImage`，其余受控工具要求 `workspace-write`。用户请求已明确涵盖的普通、可回滚操作无需再次询问；仅当操作具有实质破坏性、范围广、不可逆、明显外部副作用、超出既有授权，或需要 `danger-full-access` 时转人工确认。
 
 Relay 默认只把 `project` 作为 Cursor 设置来源。可显式加入 `team`、`mdm`；拒绝 `user`、`plugins`、`all`，以降低环境漂移、嵌套 MCP 和递归委派风险。
 

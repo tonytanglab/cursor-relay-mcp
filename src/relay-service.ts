@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { RelayError, asRelayError } from "./errors.js";
 import {
+  normalizeCodexAllowedTools,
   permissionOptions,
   resolveWorkspace,
   workspaceIsWithinRoots,
@@ -64,6 +65,16 @@ export class RelayService {
       readOnlySandboxEnabled: this.config.readOnlySandboxEnabled,
       workspaceWriteSandboxEnabled: this.config.workspaceWriteSandboxEnabled,
       settingSources: this.config.settingSources,
+      defaultTimeoutMs: this.config.defaultTimeoutMs,
+      maxTimeoutMs: this.config.maxTimeoutMs,
+      capabilities: {
+        liveRunPanel: true,
+        cursorManagedNetworkAccess: true,
+        transientReconnectKeepsRunAlive: true,
+        activeRunSteering: false,
+        activeRunSteeringReason:
+          "@cursor/sdk 1.0.28 的公开 Run API 仅支持 stream、wait、cancel 与 conversation；Relay 不会把内部事件追加伪装成已向运行中的 Agent 送达纠偏指令",
+      },
       warning:
         authentication.mode === "missing"
           ? "未配置 CURSOR_API_KEY，且没有官方 Cursor SDK stored login"
@@ -120,6 +131,9 @@ export class RelayService {
       this.config.workspaceRoots,
     );
     const permission = input.permission ?? "read-only";
+    const codexAllowedTools = normalizeCodexAllowedTools(
+      input.codexAllowedTools,
+    );
     const conversationPermission =
       permission === "danger-full-access" ? undefined : permission;
     if (!staticallyAllowed && conversationPermission === undefined) {
@@ -134,16 +148,25 @@ export class RelayService {
       this.config.dangerFullAccessEnabled,
       this.config.readOnlySandboxEnabled,
       this.config.workspaceWriteSandboxEnabled,
+      codexAllowedTools,
     );
     const timeoutMs = this.normalizeTimeout(input.timeoutMs);
     const model = await this.validateModel(input.model);
-    const normalized = { ...input, workspace, model, permission, timeoutMs };
+    const normalized = {
+      ...input,
+      workspace,
+      model,
+      permission,
+      codexAllowedTools,
+      timeoutMs,
+    };
     const fingerprint = hash(
       JSON.stringify({
         workspace,
         task: input.task,
         model,
         permission,
+        codexAllowedTools,
         timeoutMs,
         parentRunId: input.parentRunId ?? null,
       }),
@@ -194,6 +217,7 @@ export class RelayService {
       task: input.task,
       model,
       permission,
+      codexAllowedTools,
       workspaceAuthorization: staticallyAllowed
         ? { source: "static-allowlist" }
         : {
@@ -267,6 +291,7 @@ export class RelayService {
         workspace: parent.workspace,
         model: input.model ?? parent.model,
         permission: input.permission ?? parent.permission,
+        codexAllowedTools: input.codexAllowedTools ?? parent.codexAllowedTools,
       },
       callerScope,
     );
@@ -278,17 +303,22 @@ export class RelayService {
     return summarize(await this.requireRun(relayRunId));
   }
 
+  async getRunSnapshot(relayRunId: string): Promise<RelayRunSummary> {
+    return summarize(await this.requireRun(relayRunId));
+  }
+
   async listRuns(limit = 50): Promise<{ runs: RelayRunSummary[] }> {
     const state = await this.store.read();
     const runs = Object.values(state.runs)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.min(Math.max(limit, 1), 200));
-    return { runs: runs.map(summarize) };
+    return { runs: runs.map((run) => summarize(run)) };
   }
 
   async readEvents(relayRunId: string, afterSequence = 0, limit = 100) {
     const existing = await this.requireRun(relayRunId);
-    await this.ensureAttached(existing);
+    const connectionError =
+      await this.ensureAttachedOrConnectionError(existing);
     const run = await this.requireRun(relayRunId);
     const events = run.events
       .filter((event) => event.sequence > afterSequence)
@@ -298,14 +328,27 @@ export class RelayService {
       events,
       nextSequence: events.at(-1)?.sequence ?? afterSequence,
       status: run.status,
+      ...(connectionError
+        ? {
+            connection: {
+              state: "reconnecting" as const,
+              error: connectionError,
+            },
+          }
+        : {}),
     };
   }
 
   async waitRun(relayRunId: string, waitMs = 30_000) {
     const existing = await this.requireRun(relayRunId);
-    await this.ensureAttached(existing);
+    const connectionError =
+      await this.ensureAttachedOrConnectionError(existing);
     const run = await this.requireRun(relayRunId);
     if (TERMINAL.has(run.status)) return waitPayload(run);
+    if (connectionError) {
+      await delay(Math.min(Math.max(waitMs, 0), 1_000));
+      return waitPayload(await this.requireRun(relayRunId), connectionError);
+    }
     const monitor = this.monitors.get(relayRunId);
     if (monitor)
       await Promise.race([
@@ -314,6 +357,21 @@ export class RelayService {
       ]);
     else await delay(Math.min(Math.max(waitMs, 0), 30_000));
     return waitPayload(await this.requireRun(relayRunId));
+  }
+
+  private async ensureAttachedOrConnectionError(
+    run: RelayRun,
+  ): Promise<ReturnType<RelayError["toJSON"]> | undefined> {
+    try {
+      await this.ensureAttached(run);
+      return undefined;
+    } catch (error) {
+      const relayError = asRelayError(error, "SDK_RESUME_FAILED");
+      if (!relayError.retryable || Date.now() >= Date.parse(run.deadlineAt)) {
+        throw relayError;
+      }
+      return relayError.toJSON();
+    }
   }
 
   async cancelRun(relayRunId: string) {
@@ -920,6 +978,7 @@ export class RelayService {
       this.config.dangerFullAccessEnabled,
       this.config.readOnlySandboxEnabled,
       this.config.workspaceWriteSandboxEnabled,
+      run.codexAllowedTools,
     );
     return {
       agentId: run.agentId,
@@ -937,17 +996,22 @@ export class RelayService {
   }
 }
 
-function waitPayload(run: RelayRun) {
+function waitPayload(
+  run: RelayRun,
+  connectionError?: ReturnType<RelayError["toJSON"]>,
+) {
   const terminal = TERMINAL.has(run.status);
   return {
-    run: summarize(run),
+    run: summarize(run, connectionError),
     terminal,
     mustCallAgain: !terminal,
     ...(terminal
       ? {}
       : {
           nextPollAfterMs: 1_000,
-          instruction: "运行仍在继续；请再次调用 wait_run，直到 terminal=true",
+          instruction: connectionError
+            ? "Cursor SDK 暂时不可达，运行仍保持非终态；请继续调用 wait_run 以自动重连"
+            : "运行仍在继续；请再次调用 wait_run，直到 terminal=true",
         }),
   };
 }
@@ -1144,9 +1208,23 @@ function boundEventData(data: unknown): unknown {
   };
 }
 
-function summarize(run: RelayRun): RelayRunSummary {
+function summarize(
+  run: RelayRun,
+  connectionError?: ReturnType<RelayError["toJSON"]>,
+): RelayRunSummary {
   const { events, ...summary } = run;
-  return { ...summary, eventCount: events.length };
+  return {
+    ...summary,
+    eventCount: events.length,
+    ...(connectionError
+      ? {
+          connection: {
+            state: "reconnecting" as const,
+            error: connectionError,
+          },
+        }
+      : {}),
+  };
 }
 
 function outcomeMetadata(outcome: CursorRunResult): Partial<RelayRun> {

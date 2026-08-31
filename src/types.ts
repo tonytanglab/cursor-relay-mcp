@@ -2,6 +2,7 @@ export type PermissionPreset =
   | "read-only"
   | "workspace-write"
   | "danger-full-access";
+export type CodexControlledTool = "delete" | "task" | "mcp" | "generateImage";
 export type RelayRunStatus =
   | "starting"
   | "running"
@@ -41,6 +42,7 @@ export interface RelayRun {
   task: string;
   model: ModelSelection;
   permission: PermissionPreset;
+  codexAllowedTools?: CodexControlledTool[] | undefined;
   workspaceAuthorization?: {
     source: "static-allowlist" | "conversation-capability" | "interactive-once";
     approvalId?: string | undefined;
@@ -62,6 +64,10 @@ export interface RelayRun {
 
 export type RelayRunSummary = Omit<RelayRun, "events"> & {
   eventCount: number;
+  connection?: {
+    state: "reconnecting";
+    error: RelayErrorShape;
+  };
 };
 
 export interface RelayErrorShape {
@@ -82,6 +88,7 @@ export interface StartRunInput {
   task: string;
   model: ModelSelection;
   permission?: PermissionPreset | undefined;
+  codexAllowedTools?: CodexControlledTool[] | undefined;
   confirmedDangerousPermission?: boolean | undefined;
   workspaceApprovalToken?: string | undefined;
   idempotencyKey: string;

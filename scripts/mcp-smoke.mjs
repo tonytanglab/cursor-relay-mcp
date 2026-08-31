@@ -11,7 +11,7 @@ const transport = new StdioClientTransport({
   env: { ...process.env, CURSOR_API_KEY: "", CURSOR_RELAY_STATE_DIR: stateDir },
   stderr: "pipe",
 });
-const client = new Client({ name: "cursor-relay-smoke", version: "0.1.0" });
+const client = new Client({ name: "cursor-relay-smoke", version: "0.1.1" });
 try {
   await client.connect(transport);
   const tools = await client.listTools();
@@ -22,19 +22,63 @@ try {
     (tool) => tool.name === "authorize_workspace",
   );
   const startTool = tools.tools.find((tool) => tool.name === "start_run");
+  const viewTool = tools.tools.find((tool) => tool.name === "view_run");
+  const waitTool = tools.tools.find((tool) => tool.name === "wait_run");
+  const eventsTool = tools.tools.find((tool) => tool.name === "read_events");
   if (
     doctorTool?.annotations?.readOnlyHint !== true ||
     authorizeTool?.annotations?.readOnlyHint !== false ||
     authorizeTool.annotations.destructiveHint !== false ||
     startTool?.annotations?.destructiveHint !== true ||
-    startTool.annotations.idempotentHint !== true
+    startTool.annotations.idempotentHint !== true ||
+    viewTool?.annotations?.readOnlyHint !== true ||
+    startTool._meta?.ui?.resourceUri !==
+      "ui://cursor-relay/run-panel-v1.html" ||
+    viewTool._meta?.ui?.resourceUri !== "ui://cursor-relay/run-panel-v1.html" ||
+    waitTool?._meta?.["openai/widgetAccessible"] !== true ||
+    eventsTool?._meta?.["openai/widgetAccessible"] !== true
   )
     throw new Error("tool annotations missing");
+  const resources = await client.listResources();
+  const panel = resources.resources.find(
+    (resource) => resource.uri === "ui://cursor-relay/run-panel-v1.html",
+  );
+  if (panel?.mimeType !== "text/html;profile=mcp-app")
+    throw new Error("run panel resource missing");
+  const rendered = await client.readResource({ uri: panel.uri });
+  const panelText = rendered.contents[0]?.text;
+  if (
+    rendered.contents[0]?.mimeType !== "text/html;profile=mcp-app" ||
+    typeof panelText !== "string" ||
+    !panelText.includes("Cursor Relay 运行") ||
+    !panelText.includes('request("ui/initialize"') ||
+    !panelText.includes('notify("ui/notifications/initialized"') ||
+    !panelText.includes('callTool("wait_run"') ||
+    !panelText.includes('callTool("read_events"')
+  )
+    throw new Error("run panel payload invalid");
   const result = await client.callTool({ name: "doctor", arguments: {} });
   if (result.isError) throw new Error("doctor returned error");
   const structured = result.structuredContent;
   if (!structured || typeof structured.ok !== "boolean")
     throw new Error("doctor structured output missing");
+  const doctorData = structured.data;
+  if (
+    typeof doctorData !== "object" ||
+    doctorData === null ||
+    !("defaultTimeoutMs" in doctorData) ||
+    doctorData.defaultTimeoutMs !== 7_200_000 ||
+    !("maxTimeoutMs" in doctorData) ||
+    doctorData.maxTimeoutMs !== 14_400_000 ||
+    !("capabilities" in doctorData) ||
+    typeof doctorData.capabilities !== "object" ||
+    doctorData.capabilities === null ||
+    !("liveRunPanel" in doctorData.capabilities) ||
+    doctorData.capabilities.liveRunPanel !== true ||
+    !("activeRunSteering" in doctorData.capabilities) ||
+    doctorData.capabilities.activeRunSteering !== false
+  )
+    throw new Error("doctor capabilities or timeout policy missing");
   const approval = await client.callTool({
     name: "authorize_workspace",
     arguments: {

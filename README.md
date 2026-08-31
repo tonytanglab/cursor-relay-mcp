@@ -26,6 +26,12 @@ downgraded to analysis. Outside the static allowlist, `authorize_workspace`
 issues a reusable capability bound to the current Codex conversation and exact
 workspace; it supports both `read-only` and `workspace-write`.
 
+The plugin ships its Codex Skill inside the original package at
+`skills/delegate-to-cursor-agent/SKILL.md`. The manifest declares
+`"skills": "./skills/"`, and the npm package includes `skills/`, so installing
+or reinstalling the plugin makes Codex load the Skill automatically in newly
+created tasks; no install-time Skill generation is needed.
+
 ## Quick start
 
 Requirements: Git, Node.js `>=22.13`, and a Cursor account. The recommended
@@ -61,6 +67,29 @@ history, logs, or the repository. When using stored login, omit
 
 The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
 
+`doctor` reports the effective `defaultTimeoutMs` and `maxTimeoutMs`. Ordinary
+repository work should normally omit `timeoutMs` and use the configured default
+(2 hours by default); tasks expected to run longer may request a larger explicit
+budget when it is within the configured maximum. A `wait_run` timeout is only a
+polling slice. Retryable SDK reconnects are returned as
+`connection.state=reconnecting` and remain non-terminal.
+While status and events show healthy progress, callers should keep waiting within
+the run budget instead of cancelling or creating short continuation runs.
+
+`start_run` and `reply_run` attach an MCP Apps read-only panel that shows the
+current status, selected model and permission, elapsed time, incremental Cursor
+SDK event timeline, token usage, error, and final output. `view_run` opens the
+same panel for an existing Relay run. The panel calls only `wait_run` and
+`read_events`; it cannot authorize, start, reply to, or cancel a run. Hosts that
+do not render MCP Apps keep the existing structured tool-result fallback.
+
+The pinned public Cursor SDK has no operation for injecting a new instruction
+into an active local Agent run. The relay therefore reports
+`doctor.capabilities.activeRunSteering=false` and never treats an internal event
+append as successful steering. A caller must not cancel merely to redirect: it
+should keep observing and use `reply_run` after terminal state. Cancellation is
+reserved for an explicit stop request or a concrete safety boundary.
+
 Security defaults are fail-closed: unattended runs require the static workspace
 allowlist. When a user explicitly authorizes Cursor Relay for a workspace in the
 current conversation, `authorize_workspace` can issue a reusable read-only or
@@ -71,7 +100,9 @@ cannot be elevated. It expires when that conversation scope or MCP process ends.
 Permissions otherwise default to read-only, the Cursor sandbox is enabled by
 default on supported non-Windows hosts, and only project settings are loaded.
 Windows defaults the SDK sandbox off because the current local runtime reports
-it as unsupported; the read-only tool allowlist remains enforced.
+it as unsupported; the read-only tool allowlist remains enforced. Both normal
+presets expose Cursor's official `webSearch` and `webFetch` tools so Cursor can
+decide whether network research is relevant.
 `danger-full-access` still requires the static allowlist plus both
 `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS=true` at server startup and
 `confirmedDangerousPermission=true` on the request. Leave the server switch off
@@ -81,10 +112,20 @@ for normal use.
 supported non-Windows hosts. Windows always clamps this setting off because the
 current Cursor SDK local runtime does not support that sandbox path. This switch
 applies only to the `read-only` preset; its public tool allowlist remains
-restricted to `read`, `grep`, `glob`, and `ls`.
+restricted to `read`, `grep`, `glob`, `ls`, `webSearch`, and `webFetch` by
+default.
 The workspace-write sandbox follows the same platform compatibility rule: it is
 enabled by default on supported non-Windows hosts and clamped off on Windows,
 while the exact workspace authorization and disallowed-tool list remain enforced.
+
+`delete`, `task`, `mcp`, and `generateImage` are controlled by the Codex main
+process rather than being permanently unavailable. `start_run` and `reply_run`
+accept `codexAllowedTools`; omitted reply values inherit the parent policy and
+an empty array revokes it. Read-only runs may additionally allow only
+`generateImage`; the other controlled tools require `workspace-write`. Ordinary,
+reversible actions already covered by the user's request need no separate prompt.
+Human confirmation is reserved for materially destructive, broad, irreversible,
+out-of-scope, externally consequential, or `danger-full-access` actions.
 
 `CURSOR_RELAY_SETTING_SOURCES` is an optional comma-separated list restricted
 to the public `project`, `team`, and `mdm` setting layers. It defaults to

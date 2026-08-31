@@ -2,6 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { asRelayError } from "./errors.js";
 import type { RelayService } from "./relay-service.js";
+import {
+  RUN_PANEL_HTML,
+  RUN_PANEL_MIME_TYPE,
+  RUN_PANEL_URI,
+} from "./run-panel.js";
 
 const modelSchema = z.object({
   id: z.string().min(1),
@@ -14,9 +19,40 @@ const permissionSchema = z.enum([
   "workspace-write",
   "danger-full-access",
 ]);
+const codexControlledToolSchema = z.enum([
+  "delete",
+  "task",
+  "mcp",
+  "generateImage",
+]);
 
 export function createMcpServer(service: RelayService): McpServer {
-  const server = new McpServer({ name: "cursor-relay-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "cursor-relay-mcp", version: "0.1.1" });
+
+  server.registerResource(
+    "cursor-relay-run-panel",
+    RUN_PANEL_URI,
+    {
+      title: "Cursor Relay 运行状态",
+      description: "只读展示 Cursor Relay 运行状态与增量事件。",
+      mimeType: RUN_PANEL_MIME_TYPE,
+    },
+    () => ({
+      contents: [
+        {
+          uri: RUN_PANEL_URI,
+          mimeType: RUN_PANEL_MIME_TYPE,
+          text: RUN_PANEL_HTML,
+          _meta: {
+            ui: { prefersBorder: true },
+            "openai/widgetDescription":
+              "实时展示 Cursor Relay 的运行状态、模型、权限、事件时间线与最终输出。",
+            "openai/widgetPrefersBorder": true,
+          },
+        },
+      ],
+    }),
+  );
 
   server.registerTool(
     "doctor",
@@ -66,12 +102,20 @@ export function createMcpServer(service: RelayService): McpServer {
         task: z.string().min(1),
         model: modelSchema,
         permission: permissionSchema.optional(),
+        codexAllowedTools: z
+          .array(codexControlledToolSchema)
+          .max(4)
+          .optional()
+          .describe(
+            "仅由 Codex 主进程按任务范围决定的额外工具放行；高风险且超出用户既有授权时应先人工确认。",
+          ),
         confirmedDangerousPermission: z.boolean().optional(),
         workspaceApprovalToken: z.string().min(32).max(200).optional(),
         idempotencyKey: z.string().min(8).max(200),
         timeoutMs: z.number().int().optional(),
       },
       annotations: mutatingAnnotations(true),
+      _meta: runPanelMeta("正在启动 Cursor…", "Cursor 运行已启动"),
     },
     guarded(async (input, extra) =>
       service.startRun(input, callerScope(extra)),
@@ -88,12 +132,20 @@ export function createMcpServer(service: RelayService): McpServer {
         task: z.string().min(1),
         model: modelSchema.optional(),
         permission: permissionSchema.optional(),
+        codexAllowedTools: z
+          .array(codexControlledToolSchema)
+          .max(4)
+          .optional()
+          .describe(
+            "本次续接由 Codex 主进程决定的额外工具放行；省略时继承父运行，传空数组可撤销。",
+          ),
         confirmedDangerousPermission: z.boolean().optional(),
         workspaceApprovalToken: z.string().min(32).max(200).optional(),
         idempotencyKey: z.string().min(8).max(200),
         timeoutMs: z.number().int().optional(),
       },
       annotations: mutatingAnnotations(true),
+      _meta: runPanelMeta("正在续接 Cursor…", "Cursor 后续运行已启动"),
     },
     guarded(async (input, extra) =>
       service.replyRun(input, callerScope(extra)),
@@ -107,9 +159,24 @@ export function createMcpServer(service: RelayService): McpServer {
         "读取一个持久运行的当前状态，并在进程重启后自动重连 Cursor SDK 运行。",
       inputSchema: { relayRunId: z.string().min(1) },
       annotations: readOnlyAnnotations(true),
+      _meta: appCallableMeta(),
     },
     guarded(async ({ relayRunId }) => ({
       run: await service.getRun(relayRunId),
+    })),
+  );
+
+  server.registerTool(
+    "view_run",
+    {
+      description:
+        "打开一个只读实时面板，展示指定 Cursor Relay 运行的状态、事件时间线与最终输出；不启动、续接、取消或修改运行。",
+      inputSchema: { relayRunId: z.string().min(1) },
+      annotations: readOnlyAnnotations(false),
+      _meta: runPanelMeta("正在打开 Cursor 运行面板…", "Cursor 运行面板已打开"),
+    },
+    guarded(async ({ relayRunId }) => ({
+      run: await service.getRunSnapshot(relayRunId),
     })),
   );
 
@@ -123,6 +190,7 @@ export function createMcpServer(service: RelayService): McpServer {
         waitMs: z.number().int().min(0).max(30_000).optional(),
       },
       annotations: readOnlyAnnotations(true),
+      _meta: appCallableMeta(),
     },
     guarded(async ({ relayRunId, waitMs }) =>
       service.waitRun(relayRunId, waitMs),
@@ -160,6 +228,7 @@ export function createMcpServer(service: RelayService): McpServer {
         limit: z.number().int().min(1).max(500).optional(),
       },
       annotations: readOnlyAnnotations(true),
+      _meta: appCallableMeta(),
     },
     guarded(async ({ relayRunId, afterSequence, limit }) =>
       service.readEvents(relayRunId, afterSequence, limit),
@@ -167,6 +236,22 @@ export function createMcpServer(service: RelayService): McpServer {
   );
 
   return server;
+}
+
+function runPanelMeta(invoking: string, invoked: string) {
+  return {
+    ui: { resourceUri: RUN_PANEL_URI },
+    "openai/outputTemplate": RUN_PANEL_URI,
+    "openai/toolInvocation/invoking": invoking,
+    "openai/toolInvocation/invoked": invoked,
+  };
+}
+
+function appCallableMeta() {
+  return {
+    ui: { visibility: ["model", "app"] },
+    "openai/widgetAccessible": true,
+  };
 }
 
 function readOnlyAnnotations(openWorldHint: boolean) {

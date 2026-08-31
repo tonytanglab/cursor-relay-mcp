@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { delimiter, isAbsolute, resolve, sep } from "node:path";
 import { realpath } from "node:fs/promises";
 import { RelayError } from "./errors.js";
-import type { PermissionPreset } from "./types.js";
+import type { CodexControlledTool, PermissionPreset } from "./types.js";
 
 export interface RelayConfig {
   environmentApiKeyConfigured: boolean;
@@ -26,7 +26,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
   const defaultTimeoutMs = positiveInt(
     "CURSOR_RELAY_DEFAULT_TIMEOUT_MS",
     env.CURSOR_RELAY_DEFAULT_TIMEOUT_MS,
-    30 * 60_000,
+    2 * 60 * 60_000,
   );
   const maxTimeoutMs = positiveInt(
     "CURSOR_RELAY_MAX_TIMEOUT_MS",
@@ -181,7 +181,9 @@ export function permissionOptions(
   dangerFullAccessEnabled = false,
   readOnlySandboxEnabled = true,
   workspaceWriteSandboxEnabled = true,
+  codexAllowedTools: readonly CodexControlledTool[] = [],
 ) {
+  const allowedTools = normalizeCodexAllowedTools(codexAllowedTools);
   if (permission === "danger-full-access") {
     if (!dangerFullAccessEnabled) {
       throw new RelayError(
@@ -198,23 +200,50 @@ export function permissionOptions(
     return { tools: undefined, sandboxEnabled: false, autoReview: false };
   }
   if (permission === "read-only") {
+    const incompatible = allowedTools.filter(
+      (tool) => tool !== "generateImage",
+    );
+    if (incompatible.length > 0) {
+      throw new RelayError(
+        "TOOL_POLICY_PERMISSION_DENIED",
+        `read-only 不能放行可能修改工作区或扩大执行范围的工具：${incompatible.join(", ")}`,
+      );
+    }
     return {
-      tools: ["read", "grep", "glob", "ls"],
+      tools: [
+        "read",
+        "grep",
+        "glob",
+        "ls",
+        "webSearch",
+        "webFetch",
+        ...allowedTools,
+      ],
       sandboxEnabled: readOnlySandboxEnabled,
       autoReview: true,
     };
   }
+  const allowed = new Set(allowedTools);
   return {
     tools: undefined,
-    disallowedTools: [
-      "delete",
-      "task",
-      "mcp",
-      "webSearch",
-      "webFetch",
-      "generateImage",
-    ],
+    disallowedTools: CODEX_CONTROLLED_TOOLS.filter(
+      (tool) => !allowed.has(tool),
+    ),
     sandboxEnabled: workspaceWriteSandboxEnabled,
     autoReview: true,
   };
+}
+
+export const CODEX_CONTROLLED_TOOLS = [
+  "delete",
+  "task",
+  "mcp",
+  "generateImage",
+] as const satisfies readonly CodexControlledTool[];
+
+export function normalizeCodexAllowedTools(
+  tools: readonly CodexControlledTool[] = [],
+): CodexControlledTool[] {
+  const requested = new Set(tools);
+  return CODEX_CONTROLLED_TOOLS.filter((tool) => requested.has(tool));
 }

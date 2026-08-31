@@ -65,6 +65,7 @@ test("state store serializes concurrent atomic updates", async () => {
         task: "test",
         model: { id: "model" },
         permission: "read-only",
+        codexAllowedTools: ["generateImage"],
         status: "running",
         createdAt: now,
         updatedAt: now,
@@ -88,7 +89,10 @@ test("state store serializes concurrent atomic updates", async () => {
         }),
       ),
     );
-    assert.equal((await store.read()).runs.run?.events.length, 10);
+    const run = (await store.read()).runs.run;
+    assert.ok(run);
+    assert.equal(run.events.length, 10);
+    assert.deepEqual(run.codexAllowedTools, ["generateImage"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

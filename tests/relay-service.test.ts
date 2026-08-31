@@ -231,6 +231,8 @@ test("model validation, permission mapping, idempotency and wait contract", asyn
       "grep",
       "glob",
       "ls",
+      "webSearch",
+      "webFetch",
     ]);
     await assert.rejects(
       item.service.startRun({ ...input, task: "different" }),
@@ -432,6 +434,52 @@ test("explicit conversation approval grants reusable read/write access outside s
   }
 });
 
+test("Codex-controlled tool policy is persisted and inherited by replies", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "controlled tools",
+      model: { id: "cursor-test" },
+      permission: "workspace-write",
+      codexAllowedTools: ["generateImage"],
+      idempotencyKey: "controlled-tools-start",
+    });
+    assert.deepEqual(item.sdk.launches[0]?.disallowedTools, [
+      "delete",
+      "task",
+      "mcp",
+    ]);
+    assert.deepEqual(
+      (await item.store.read()).runs[started.run.relayRunId]?.codexAllowedTools,
+      ["generateImage"],
+    );
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "done" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+
+    const reply = await item.service.replyRun({
+      parentRunId: started.run.relayRunId,
+      task: "inherit controlled tools",
+      model: { id: "cursor-test" },
+      idempotencyKey: "controlled-tools-reply",
+    });
+    assert.deepEqual(reply.run.codexAllowedTools, ["generateImage"]);
+    assert.deepEqual(item.sdk.launches[1]?.disallowedTools, [
+      "delete",
+      "task",
+      "mcp",
+    ]);
+    item.sdk.runs
+      .get(reply.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "replied" });
+    await item.service.waitRun(reply.run.relayRunId, 2_000);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
 test("a new service instance reconnects a persisted SDK run", async () => {
   const item = await fixture();
   try {
@@ -489,6 +537,60 @@ test("retryable getRun failure before deadline preserves recovery state", async 
     const done = await resumed.waitRun(started.run.relayRunId, 2_000);
     assert.equal(done.run.status, "succeeded");
     assert.equal(done.run.assistantText, "recovered after retry");
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("wait and event polling surface retryable reconnect state without failing the run", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "survive transient reconnect",
+      model: { id: "cursor-test" },
+      idempotencyKey: "retryable-poll-reconnect",
+    });
+    const resumed = new RelayService(item.config, item.store, item.sdk);
+    item.sdk.getRunErrors.push(
+      new RelayError("CURSOR_NETWORK_ERROR", "temporary outage", {
+        retryable: true,
+      }),
+    );
+
+    const waiting = await resumed.waitRun(started.run.relayRunId, 0);
+    assert.equal(waiting.terminal, false);
+    assert.equal(waiting.mustCallAgain, true);
+    assert.equal(waiting.run.status, "running");
+    assert.ok(waiting.run.connection);
+    assert.equal(waiting.run.connection.state, "reconnecting");
+    assert.equal(waiting.run.connection.error.code, "CURSOR_NETWORK_ERROR");
+
+    item.sdk.getRunErrors.push(
+      new RelayError("CURSOR_NETWORK_ERROR", "still reconnecting", {
+        retryable: true,
+      }),
+    );
+    const events = await resumed.readEvents(started.run.relayRunId);
+    assert.equal(events.status, "running");
+    assert.ok(events.connection);
+    assert.equal(events.connection.state, "reconnecting");
+    assert.equal(events.connection.error.code, "CURSOR_NETWORK_ERROR");
+
+    const snapshot = await resumed.getRunSnapshot(started.run.relayRunId);
+    assert.equal(snapshot.status, "running");
+    assert.equal(snapshot.connection, undefined);
+    const persisted = await item.store.read();
+    assert.equal(persisted.runs[started.run.relayRunId]?.error, undefined);
+
+    item.sdk.runs.get(started.run.sdkRunId ?? "")?.finish({
+      status: "finished",
+      result: "reconnected",
+    });
+    const done = await resumed.waitRun(started.run.relayRunId, 2_000);
+    assert.equal(done.run.status, "succeeded");
+    assert.equal(done.run.assistantText, "reconnected");
+    assert.equal(done.run.connection, undefined);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }
