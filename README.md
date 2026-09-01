@@ -2,7 +2,7 @@
 
 A local MCP server built on the official `@cursor/sdk`. It lets MCP clients delegate a bounded task to an explicitly selected Cursor model while keeping durable, restart-safe run state.
 
-`@cursor/sdk` is public beta. This package pins exactly `1.0.28` and includes an SDK export contract test. See [README.zh-CN.md](./README.zh-CN.md) for the full guide.
+`@cursor/sdk` is public beta. This package pins exactly `1.0.30` and includes an SDK export contract test. See [README.zh-CN.md](./README.zh-CN.md) for the full guide.
 
 For a tested Codex Desktop installation workflow on Windows, including personal marketplace layout, CLI fallback, sandbox compatibility, cache refresh, and a Grok 4.6 smoke test, see [CODEX_INSTALL.zh-CN.md](./CODEX_INSTALL.zh-CN.md).
 
@@ -67,7 +67,7 @@ an optional alternative for automation, but do not put it in `.mcp.json`, shell
 history, logs, or the repository. When using stored login, omit
 `CURSOR_API_KEY` entirely instead of setting it to an empty string.
 
-The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
+The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. The SDK stored login is independent of the Cursor desktop login; after explicit user confirmation, `reauthenticate_cursor` can replace a mismatched SDK login without exposing its API key. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
 
 For `start_run` and `reply_run`, `task` means review/implementation scope and
 acceptance requirements, never file contents. Use `targetLocations` for

@@ -38,11 +38,27 @@ export class CursorSdkAdapter implements CursorSdkPort {
       return status.status === "logged-in"
         ? {
             mode: "stored-login" as const,
+            ...(status.email === undefined ? {} : { email: status.email }),
+            backendUrl: status.backendUrl,
             ...(status.apiKeyExpiresAtMs === undefined
               ? {}
               : { expiresAtMs: status.apiKeyExpiresAtMs }),
           }
         : { mode: "missing" as const };
+    });
+  }
+
+  async reauthenticate() {
+    return await sdkCall(async () => {
+      const result = await Cursor.auth.login({
+        openBrowser: true,
+        apiKeyName: "Cursor Relay MCP",
+      });
+      return {
+        mode: "stored-login" as const,
+        expiresAtMs: result.apiKeyExpiresAtMs,
+        ...(result.email === undefined ? {} : { email: result.email }),
+      };
     });
   }
 
@@ -231,8 +247,11 @@ export function mapSdkError(error: unknown): RelayError {
       { cause: error },
     );
   }
-  const code =
-    error instanceof AuthenticationError
+  const planRequired =
+    error.code === "plan_required" || /\[plan_required\]/iu.test(error.message);
+  const code = planRequired
+    ? "CURSOR_ACCOUNT_PLAN_REQUIRED"
+    : error instanceof AuthenticationError
       ? "CURSOR_AUTHENTICATION_FAILED"
       : error instanceof RateLimitError
         ? "CURSOR_RATE_LIMITED"
@@ -245,15 +264,25 @@ export function mapSdkError(error: unknown): RelayError {
               : error instanceof ConfigurationError
                 ? "CURSOR_CONFIGURATION_ERROR"
                 : "CURSOR_SDK_ERROR";
-  return new RelayError(code, error.message, {
-    retryable: error.isRetryable,
-    cause: error,
-    details: {
-      ...(error.code === undefined ? {} : { sdkCode: error.code }),
-      ...(error.status === undefined ? {} : { status: error.status }),
-      ...(error.requestId === undefined ? {} : { requestId: error.requestId }),
-      ...(error.endpoint === undefined ? {} : { endpoint: error.endpoint }),
-      ...(error.operation === undefined ? {} : { operation: error.operation }),
+  return new RelayError(
+    code,
+    planRequired
+      ? "当前 Cursor SDK stored login 对应账户没有 Cloud Agent 权限；若 Cursor 桌面端已是 Pro，请调用 reauthenticate_cursor 重新选择同一账户，然后再次调用 list_models 验证。"
+      : error.message,
+    {
+      retryable: error.isRetryable,
+      cause: error,
+      details: {
+        ...(error.code === undefined ? {} : { sdkCode: error.code }),
+        ...(error.status === undefined ? {} : { status: error.status }),
+        ...(error.requestId === undefined
+          ? {}
+          : { requestId: error.requestId }),
+        ...(error.endpoint === undefined ? {} : { endpoint: error.endpoint }),
+        ...(error.operation === undefined
+          ? {}
+          : { operation: error.operation }),
+      },
     },
-  });
+  );
 }

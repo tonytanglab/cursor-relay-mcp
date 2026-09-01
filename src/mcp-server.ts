@@ -122,6 +122,19 @@ export function createMcpServer(service: RelayService): McpServer {
   );
 
   server.registerTool(
+    "reauthenticate_cursor",
+    {
+      description:
+        "当 Cursor SDK stored login 与用户确认的 Cursor 账户或套餐不一致时，打开系统浏览器重新登录并替换 SDK 本地凭据。不会读取或返回 API key；完成后必须重新调用 list_models 验证权限。",
+      inputSchema: {
+        confirmed: z.literal(true),
+      },
+      annotations: mutatingAnnotations(true),
+    },
+    guarded(async () => service.reauthenticateCursorAccount()),
+  );
+
+  server.registerTool(
     "authorize_workspace",
     {
       description:

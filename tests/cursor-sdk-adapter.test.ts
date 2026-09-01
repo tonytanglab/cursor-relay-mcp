@@ -101,14 +101,55 @@ test("adapter exposes official stored login status without returning a key", asy
       value: async () => ({
         status: "logged-in",
         backendUrl: "https://api.cursor.com",
+        email: "pro@example.com",
         apiKeyExpiresAtMs: 987,
       }),
     });
     const status = await new CursorSdkAdapter(dir).authStatus();
-    assert.deepEqual(status, { mode: "stored-login", expiresAtMs: 987 });
+    assert.deepEqual(status, {
+      mode: "stored-login",
+      expiresAtMs: 987,
+      email: "pro@example.com",
+      backendUrl: "https://api.cursor.com",
+    });
     assert.equal(JSON.stringify(status).includes("apiKey"), false);
   } finally {
     Object.defineProperty(Cursor.auth, "status", descriptor);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("adapter reauthenticates with browser login without exposing the minted key", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cursor-relay-adapter-"));
+  const descriptor = Object.getOwnPropertyDescriptor(Cursor.auth, "login");
+  assert.ok(descriptor);
+  let receivedOptions: unknown;
+  try {
+    Object.defineProperty(Cursor.auth, "login", {
+      configurable: true,
+      value: async (options: unknown) => {
+        receivedOptions = options;
+        return {
+          apiKey: "must-not-leak",
+          email: "pro@example.com",
+          apiKeyExpiresAtMs: 123_456,
+        };
+      },
+    });
+    const result = await new CursorSdkAdapter(dir).reauthenticate();
+    assert.deepEqual(receivedOptions, {
+      openBrowser: true,
+      apiKeyName: "Cursor Relay MCP",
+    });
+    assert.deepEqual(result, {
+      mode: "stored-login",
+      email: "pro@example.com",
+      expiresAtMs: 123_456,
+    });
+    assert.equal(JSON.stringify(result).includes("must-not-leak"), false);
+    assert.equal(JSON.stringify(result).includes("apiKey"), false);
+  } finally {
+    Object.defineProperty(Cursor.auth, "login", descriptor);
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -194,4 +235,13 @@ test("official SDK errors map to stable non-sensitive Relay errors", () => {
   ] as const;
   for (const [error, expected] of mappings)
     assert.equal(mapSdkError(error).code, expected);
+
+  const planRequired = mapSdkError(
+    new ConfigurationError("[plan_required] upgrade", {
+      code: "plan_required",
+      status: 403,
+    }),
+  );
+  assert.equal(planRequired.code, "CURSOR_ACCOUNT_PLAN_REQUIRED");
+  assert.match(planRequired.message, /reauthenticate_cursor/u);
 });

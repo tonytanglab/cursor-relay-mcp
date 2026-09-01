@@ -60,6 +60,12 @@ export class RelayService {
       ok: authentication.mode !== "missing",
       sdkVersion: CURSOR_SDK_VERSION,
       authentication: authentication.mode,
+      ...(authentication.mode === "stored-login" && authentication.email
+        ? { authenticationEmail: authentication.email }
+        : {}),
+      ...(authentication.mode === "stored-login" && authentication.backendUrl
+        ? { authenticationBackendUrl: authentication.backendUrl }
+        : {}),
       ...(authentication.mode === "stored-login" &&
       authentication.expiresAtMs !== undefined
         ? { authenticationExpiresAtMs: authentication.expiresAtMs }
@@ -91,6 +97,21 @@ export class RelayService {
 
   async listModels() {
     return { models: await this.getModels() };
+  }
+
+  async reauthenticateCursorAccount() {
+    const authentication = await this.sdk.reauthenticate();
+    this.modelCache = undefined;
+    this.modelRefresh = undefined;
+    return {
+      authentication: authentication.mode,
+      ...(authentication.email
+        ? { authenticationEmail: authentication.email }
+        : {}),
+      authenticationExpiresAtMs: authentication.expiresAtMs,
+      instruction:
+        "已替换 Cursor SDK stored login；请立即调用 list_models 验证该账户的实际模型权限。",
+    };
   }
 
   async authorizeConversationWorkspace(
@@ -1059,7 +1080,6 @@ async function raceWithDeadline<T>(
       promise.then((outcome) => ({ kind: "outcome" as const, outcome })),
       new Promise<{ kind: "timeout" }>((resolve) => {
         timer = setTimeout(() => resolve({ kind: "timeout" }), ms);
-        timer.unref();
       }),
     ]);
   } finally {

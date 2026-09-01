@@ -18,6 +18,9 @@ try {
   if (!tools.tools.some((tool) => tool.name === "wait_run"))
     throw new Error("wait_run missing");
   const doctorTool = tools.tools.find((tool) => tool.name === "doctor");
+  const reauthenticateTool = tools.tools.find(
+    (tool) => tool.name === "reauthenticate_cursor",
+  );
   const authorizeTool = tools.tools.find(
     (tool) => tool.name === "authorize_workspace",
   );
@@ -28,6 +31,7 @@ try {
   const startProperties = startTool?.inputSchema?.properties;
   if (
     doctorTool?.annotations?.readOnlyHint !== true ||
+    reauthenticateTool?.annotations?.destructiveHint !== true ||
     authorizeTool?.annotations?.readOnlyHint !== false ||
     authorizeTool.annotations.destructiveHint !== false ||
     startTool?.annotations?.destructiveHint !== true ||

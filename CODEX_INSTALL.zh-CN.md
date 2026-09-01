@@ -357,6 +357,8 @@ Local SDK sandboxing was requested, but sandboxing is not supported in this envi
 doctor → list_models → authorize_workspace（按需）→ start_run → wait_run（循环）
 ```
 
+Cursor SDK stored login 与 Cursor 桌面端登录相互独立。若用户确认桌面端账户是 Pro，而 `list_models` 返回 `CURSOR_ACCOUNT_PLAN_REQUIRED`，先核对 `doctor.data.authenticationEmail`。仅在用户明确允许替换 SDK 登录后调用 `reauthenticate_cursor`（`confirmed=true`），在浏览器选择正确账户；完成后重新执行 `doctor` 和 `list_models`，不能把登录成功本身当作套餐权限证明。
+
 避坑：
 
 - `authorize_workspace` 的 token 绑定当前 MCP task/session 与规范化工作区，可在本对话的多次运行中复用，作用域或 MCP 进程结束后失效。
@@ -391,21 +393,22 @@ cachebuster 是本地重装标识，不应叠加多个后缀，也不应为了�
 
 ## 十二、故障速查
 
-| 现象                                                  | 原因                                                                                  | 处理                                                            |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `plugin list` 显示版本为空                            | marketplace 条目存在，但 `%USERPROFILE%\plugins\cursor-relay-mcp` 不存在或无 manifest | 把仓库放到正确路径，或建立目录联接                              |
-| 误把仓库放进 `.agents\plugins`                        | 混淆 marketplace 清单目录与插件源目录                                                 | 移到 `%USERPROFILE%\plugins`；清理重复副本前先核验路径          |
-| `codex.exe` 拒绝访问                                  | 命中 WindowsApps 受保护的桌面版内部路径                                               | 使用 `.codex\plugins\.plugin-appserver\codex.exe`，或更新 Codex |
-| `logged-out`                                          | 当前 Windows 用户没有 Cursor stored login                                             | 在插件目录执行 `Cursor.auth.login()`                            |
-| `CURSOR_CONFIGURATION_ERROR` 提到 sandbox unsupported | 旧版插件仍在 Windows 强制启用 sandbox，或非 Windows 主机不支持                        | 更新并重装插件；非 Windows 仅为只读模式设置兼容环境变量         |
-| 安装后当前任务没有工具                                | 插件工具只在任务创建时加载                                                            | 新建 Codex 任务                                                 |
-| 再次安装仍运行旧内容                                  | manifest version 未变化，命中旧缓存                                                   | 使用单一 cachebuster 后缀重装                                   |
-| `WORKSPACE_APPROVAL_REQUIRED`                         | 工作区不在静态白名单且当前对话尚未签发 capability                                     | 当前对话明确授权后调用 `authorize_workspace`                    |
-| `WORKSPACE_APPROVAL_MISMATCH`                         | 工作区、权限上限或 MCP 对话 scope 不一致                                              | 使用本对话为该精确工作区签发的匹配 token                        |
-| `wait_run` 返回 `terminal=false`                      | 运行尚未结束，不是失败                                                                | 按 `mustCallAgain` 继续轮询                                     |
-| stored login 存在但仍认证失败                         | MCP 由不同 Windows 用户启动，或传了空 `CURSOR_API_KEY`                                | 使用同一用户并完全省略空 Key                                    |
-| `STATE_UPDATE_FAILED` 且系统码为 `EPERM/EACCES/EBUSY` | 旧版 Relay 单次原子替换失败，或目标状态文件被同步软件、杀毒软件等长时间占用           | 更新并重装插件；把状态目录放在本地非同步磁盘，再新建 Codex 任务 |
-| 状态目录遗留多个 `relay-state.json.*.tmp`             | 旧版进程在写完临时快照后未能替换目标，或在替换窗口退出                                | 先退出全部 Codex/Relay 进程，再把孤儿文件移动到备份目录         |
+| 现象                                                  | 原因                                                                                  | 处理                                                                                              |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `plugin list` 显示版本为空                            | marketplace 条目存在，但 `%USERPROFILE%\plugins\cursor-relay-mcp` 不存在或无 manifest | 把仓库放到正确路径，或建立目录联接                                                                |
+| 误把仓库放进 `.agents\plugins`                        | 混淆 marketplace 清单目录与插件源目录                                                 | 移到 `%USERPROFILE%\plugins`；清理重复副本前先核验路径                                            |
+| `codex.exe` 拒绝访问                                  | 命中 WindowsApps 受保护的桌面版内部路径                                               | 使用 `.codex\plugins\.plugin-appserver\codex.exe`，或更新 Codex                                   |
+| `logged-out`                                          | 当前 Windows 用户没有 Cursor stored login                                             | 在插件目录执行 `Cursor.auth.login()`                                                              |
+| `CURSOR_ACCOUNT_PLAN_REQUIRED` 且桌面端已是 Pro       | SDK stored login 与桌面端是两份独立登录，当前 SDK 凭据可能属于另一账户                | 核对 `doctor.authenticationEmail`；经用户确认后调用 `reauthenticate_cursor`，再复验 `list_models` |
+| `CURSOR_CONFIGURATION_ERROR` 提到 sandbox unsupported | 旧版插件仍在 Windows 强制启用 sandbox，或非 Windows 主机不支持                        | 更新并重装插件；非 Windows 仅为只读模式设置兼容环境变量                                           |
+| 安装后当前任务没有工具                                | 插件工具只在任务创建时加载                                                            | 新建 Codex 任务                                                                                   |
+| 再次安装仍运行旧内容                                  | manifest version 未变化，命中旧缓存                                                   | 使用单一 cachebuster 后缀重装                                                                     |
+| `WORKSPACE_APPROVAL_REQUIRED`                         | 工作区不在静态白名单且当前对话尚未签发 capability                                     | 当前对话明确授权后调用 `authorize_workspace`                                                      |
+| `WORKSPACE_APPROVAL_MISMATCH`                         | 工作区、权限上限或 MCP 对话 scope 不一致                                              | 使用本对话为该精确工作区签发的匹配 token                                                          |
+| `wait_run` 返回 `terminal=false`                      | 运行尚未结束，不是失败                                                                | 按 `mustCallAgain` 继续轮询                                                                       |
+| stored login 存在但仍认证失败                         | MCP 由不同 Windows 用户启动，或传了空 `CURSOR_API_KEY`                                | 使用同一用户并完全省略空 Key                                                                      |
+| `STATE_UPDATE_FAILED` 且系统码为 `EPERM/EACCES/EBUSY` | 旧版 Relay 单次原子替换失败，或目标状态文件被同步软件、杀毒软件等长时间占用           | 更新并重装插件；把状态目录放在本地非同步磁盘，再新建 Codex 任务                                   |
+| 状态目录遗留多个 `relay-state.json.*.tmp`             | 旧版进程在写完临时快照后未能替换目标，或在替换窗口退出                                | 先退出全部 Codex/Relay 进程，再把孤儿文件移动到备份目录                                           |
 
 Windows 状态持久层避坑：
 

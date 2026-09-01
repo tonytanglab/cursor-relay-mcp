@@ -1,6 +1,6 @@
 import type { ModelSelection, TokenUsage } from "./types.js";
 
-export const CURSOR_SDK_VERSION = "1.0.28";
+export const CURSOR_SDK_VERSION = "1.0.30";
 
 export interface CursorModel {
   id: string;
@@ -50,8 +50,19 @@ export interface CursorRunHandle {
 
 export type CursorAuthStatus =
   | { mode: "environment-api-key" }
-  | { mode: "stored-login"; expiresAtMs?: number }
+  | {
+      mode: "stored-login";
+      expiresAtMs?: number;
+      email?: string;
+      backendUrl?: string;
+    }
   | { mode: "missing" };
+
+export interface CursorLoginResult {
+  mode: "stored-login";
+  expiresAtMs: number;
+  email?: string;
+}
 
 export interface AgentLaunchOptions {
   agentId: string;
@@ -67,6 +78,7 @@ export interface AgentLaunchOptions {
 
 export interface CursorSdkPort {
   authStatus(): Promise<CursorAuthStatus>;
+  reauthenticate(): Promise<CursorLoginResult>;
   listModels(): Promise<CursorModel[]>;
   start(task: string, options: AgentLaunchOptions): Promise<CursorRunHandle>;
   reply(

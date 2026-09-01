@@ -2,7 +2,7 @@
 
 基于官方 `@cursor/sdk` 的本地 MCP 服务，让 Codex、Claude Code 或其他 MCP 客户端把一个明确子任务交给指定 Cursor 模型，同时保留可恢复的运行状态。
 
-> `@cursor/sdk` 仍为 public beta。本项目把它精确锁定为 `1.0.28`，并提供 SDK 导出契约测试；升级前请先修改版本并运行完整兼容测试。
+> `@cursor/sdk` 仍为 public beta。本项目把它精确锁定为 `1.0.30`，并提供 SDK 导出契约测试；升级前请先修改版本并运行完整兼容测试。
 
 ## 能力
 
@@ -109,7 +109,7 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 
 `cwd: "."` 由 Codex 解析为已安装插件的版本缓存根目录，因此这里不能写开发机的绝对仓库路径，也不能写 `%USERPROFILE%\.codex\plugins\cache\...` 这种会随版本变化的缓存路径。不要再给 Codex 手工添加第二份同名 MCP 配置，否则可能同时启动两个 Relay 进程并读写同一状态目录。不要把 `CURSOR_API_KEY` 写进 `.mcp.json`；内置 MCP 使用启动 Codex 的同一操作系统用户的 Cursor stored login。
 
-安装或重装后必须新建 Codex 任务。Codex 会从 manifest 加载 Skill，并从 `.mcp.json` 启动 MCP；界面里的工具名可能带规范化前缀，`start_run` / `reply_run` 会附带进度卡片，也可随时调用 `view_run` 重开。正确链路是：
+安装或重装后必须新建 Codex 任务。Codex 会从 manifest 加载 Skill，并从 `.mcp.json` 启动 MCP；界面里的工具名可能带规范化前缀，逻辑工具包括 `doctor`、`list_models`、`reauthenticate_cursor`、`authorize_workspace`、`start_run`、`reply_run`、`view_run` 和 `wait_run`。`start_run` / `reply_run` 会附带进度卡片，也可随时调用 `view_run` 重开。正确链路是：
 
 本插件的 Codex Skill 已作为原始包内容内置在 `skills/delegate-to-cursor-agent/SKILL.md`。manifest 通过 `"skills": "./skills/"` 声明它，`package.json` 也把整个 `skills/` 纳入发布文件。因此安装或重装插件后，Codex 会在新建任务中自动加载该 Skill，不需要、也不应在安装时动态生成另一份副本。
 
@@ -126,19 +126,20 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 
 ## 工具合约
 
-| 工具                  | 用途                                                    |
-| --------------------- | ------------------------------------------------------- |
-| `doctor`              | 检查认证、状态目录和工作区白名单，不请求模型            |
-| `list_models`         | 发现当前账户可用模型和参数                              |
-| `authorize_workspace` | 为当前对话和精确工作区签发可复用的只读或读写 capability |
-| `start_run`           | 仅用目标位置、任务范围、明确权限和幂等键启动运行        |
-| `reply_run`           | 仅用目标位置与任务范围续接已结束的 Agent 会话           |
-| `get_run`             | 读取状态并在重启后重连                                  |
-| `view_run`            | 打开只读实时面板查看既有运行                            |
-| `wait_run`            | 最多等待 30 秒，直到 `terminal=true`                    |
-| `cancel_run`          | 取消运行                                                |
-| `list_runs`           | 查看持久运行                                            |
-| `read_events`         | 增量读取有限流事件                                      |
+| 工具                    | 用途                                                    |
+| ----------------------- | ------------------------------------------------------- |
+| `doctor`                | 检查认证、状态目录和工作区白名单，不请求模型            |
+| `list_models`           | 发现当前账户可用模型和参数                              |
+| `reauthenticate_cursor` | 浏览器重新登录并替换 SDK stored login，不返回 API key   |
+| `authorize_workspace`   | 为当前对话和精确工作区签发可复用的只读或读写 capability |
+| `start_run`             | 仅用目标位置、任务范围、明确权限和幂等键启动运行        |
+| `reply_run`             | 仅用目标位置与任务范围续接已结束的 Agent 会话           |
+| `get_run`               | 读取状态并在重启后重连                                  |
+| `view_run`              | 打开只读实时面板查看既有运行                            |
+| `wait_run`              | 最多等待 30 秒，直到 `terminal=true`                    |
+| `cancel_run`            | 取消运行                                                |
+| `list_runs`             | 查看持久运行                                            |
+| `read_events`           | 增量读取有限流事件                                      |
 
 静态白名单内的推荐调用顺序：`doctor` → `list_models` → `start_run` → 重复 `wait_run` → 验证 `assistantText`。静态白名单外，仅当用户在当前对话明确要求 Cursor Relay 使用该工作区时调用一次 `authorize_workspace`，后续在同一对话、同一工作区的多次 `start_run` / `reply_run` 中复用返回的 `workspaceApprovalToken`；每个新运行仍使用独立任务文本和幂等键。
 
@@ -149,6 +150,8 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 `doctor` 会返回实际生效的 `defaultTimeoutMs` 与 `maxTimeoutMs`。普通仓库任务必须省略 `timeoutMs`，使用默认 24 小时总预算；只有用户或任务确实要求更短预算时才显式传入，任何运行都不能超过 24 小时硬上限。单次 `wait_run` 超时只是轮询切片；可重试的 SDK 重连异常会返回 `connection.state=reconnecting` 并保持运行非终态。只要运行状态与事件持续正常推进，就应在总预算内继续等待，不应因已等待 10 分钟、2 小时或 4 小时而取消或拆成多个短续接运行；真正达到 24 小时总预算才是执行超时，不代表任务推理在语义上失败。
 
 锁定的公开 Cursor SDK 当前没有向正在执行的本地 Agent run 注入新指令的操作；`doctor.capabilities.activeRunSteering` 因此明确为 `false`。Relay 不会把内部事件追加伪装成“纠偏指令已送达”。调用方也不应仅为调整方向就取消活动运行：应继续观察至终态，再用 `reply_run` 续接；只有用户明确要求停止，或继续执行将跨越具体安全边界时才取消。
+
+Cursor SDK stored login 与 Cursor 桌面端登录彼此独立。若 `doctor.authentication=stored-login` 但 `list_models` 返回 `CURSOR_ACCOUNT_PLAN_REQUIRED`，先核对 `doctor.authenticationEmail`；只有用户明确同意替换 SDK 登录时才调用 `reauthenticate_cursor`（参数 `confirmed=true`），完成后必须重新运行 `doctor` 与 `list_models`。重新登录成功本身不等于套餐权限已经验证。
 
 对话级 capability 不持久化令牌，只在 MCP 进程内保存其 SHA-256 摘要，并绑定规范化真实路径、权限上限与 MCP task/session（可用时）；作用域或进程结束后立即失效。运行状态只持久化授权 ID、来源和时间作为审计证据。`workspace-write` capability 可用于同一工作区的读写或只读运行，只读 capability 不能提权；`danger-full-access` 仍必须命中静态白名单，并继续执行服务端总开关与请求二次确认。
 

@@ -130,11 +130,30 @@ class FakeSdk implements CursorSdkPort {
   getRunErrors: Error[] = [];
   authMode:
     | { mode: "environment-api-key" }
-    | { mode: "stored-login"; expiresAtMs?: number }
+    | {
+        mode: "stored-login";
+        expiresAtMs?: number;
+        email?: string;
+        backendUrl?: string;
+      }
     | { mode: "missing" } = { mode: "environment-api-key" };
 
   async authStatus() {
     return this.authMode;
+  }
+
+  async reauthenticate() {
+    this.authMode = {
+      mode: "stored-login",
+      expiresAtMs: 234_567,
+      email: "pro@example.com",
+      backendUrl: "https://api.cursor.com",
+    };
+    return {
+      mode: "stored-login" as const,
+      expiresAtMs: 234_567,
+      email: "pro@example.com",
+    };
   }
 
   async listModels() {
@@ -850,13 +869,36 @@ test("100 concurrent idempotent starts share one SDK launch", async () => {
 test("doctor supports official stored login without exposing credentials", async () => {
   const item = await fixture();
   try {
-    item.sdk.authMode = { mode: "stored-login", expiresAtMs: 123_456 };
+    item.sdk.authMode = {
+      mode: "stored-login",
+      expiresAtMs: 123_456,
+      email: "pro@example.com",
+      backendUrl: "https://api.cursor.com",
+    };
     const doctor = await item.service.doctor();
     assert.equal(doctor.ok, true);
     assert.equal(doctor.authentication, "stored-login");
     assert.equal(doctor.authenticationExpiresAtMs, 123_456);
+    assert.equal(doctor.authenticationEmail, "pro@example.com");
+    assert.equal(doctor.authenticationBackendUrl, "https://api.cursor.com");
     assert.equal(doctor.dangerFullAccessEnabled, false);
     assert.equal(JSON.stringify(doctor).includes("secret-for-test"), false);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("reauthentication clears model cache and returns no API key", async () => {
+  const item = await fixture();
+  try {
+    await item.service.listModels();
+    await item.service.listModels();
+    assert.equal(item.sdk.listModelsCalls, 1);
+    const result = await item.service.reauthenticateCursorAccount();
+    assert.equal(result.authenticationEmail, "pro@example.com");
+    assert.equal(JSON.stringify(result).includes("apiKey"), false);
+    await item.service.listModels();
+    assert.equal(item.sdk.listModelsCalls, 2);
   } finally {
     await rm(item.dir, { recursive: true, force: true });
   }
