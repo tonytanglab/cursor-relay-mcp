@@ -17,6 +17,11 @@ import {
   type CursorSdkPort,
 } from "./sdk-port.js";
 import { StateStore } from "./state-store.js";
+import {
+  buildCursorWorkspaceTask,
+  normalizeTargetLocations,
+  normalizeTaskScope,
+} from "./task-contract.js";
 import { WorkspaceApprovalBroker } from "./workspace-approval.js";
 import type {
   AuthorizeWorkspaceInput,
@@ -69,6 +74,8 @@ export class RelayService {
       maxTimeoutMs: this.config.maxTimeoutMs,
       capabilities: {
         liveRunPanel: true,
+        workspaceReadsSourceDirectly: true,
+        embeddedSourceArgumentsRejected: true,
         cursorManagedNetworkAccess: true,
         transientReconnectKeepsRunAlive: true,
         activeRunSteering: false,
@@ -117,7 +124,7 @@ export class RelayService {
       permission,
       source: "conversation-capability" as const,
       ...grant,
-      instruction: `在当前对话后续运行中，用相同 workspace 和不高于 ${permission} 的权限调用 start_run 或 reply_run，并传入 workspaceApprovalToken；令牌只显示一次但可在本对话内复用。`,
+      instruction: `在当前对话后续运行中，用相同 workspace 和不高于 ${permission} 的权限调用 start_run 或 reply_run，并传入 workspaceApprovalToken；只传 targetLocations 与 task 范围，禁止嵌入源码正文，由 Cursor 在获授权工作区自行读取。令牌只显示一次但可在本对话内复用。`,
     };
   }
 
@@ -152,9 +159,13 @@ export class RelayService {
     );
     const timeoutMs = this.normalizeTimeout(input.timeoutMs);
     const model = await this.validateModel(input.model);
+    const task = normalizeTaskScope(input.task);
+    const targetLocations = normalizeTargetLocations(input.targetLocations);
     const normalized = {
       ...input,
       workspace,
+      task,
+      targetLocations,
       model,
       permission,
       codexAllowedTools,
@@ -163,7 +174,8 @@ export class RelayService {
     const fingerprint = hash(
       JSON.stringify({
         workspace,
-        task: input.task,
+        task,
+        targetLocations,
         model,
         permission,
         codexAllowedTools,
@@ -214,7 +226,8 @@ export class RelayService {
       relayRunId,
       agentId,
       workspace,
-      task: input.task,
+      task,
+      ...(targetLocations.length > 0 ? { targetLocations } : {}),
       model,
       permission,
       codexAllowedTools,
@@ -291,6 +304,7 @@ export class RelayService {
         workspace: parent.workspace,
         model: input.model ?? parent.model,
         permission: input.permission ?? parent.permission,
+        targetLocations: input.targetLocations ?? parent.targetLocations,
         codexAllowedTools: input.codexAllowedTools ?? parent.codexAllowedTools,
       },
       callerScope,
@@ -412,9 +426,14 @@ export class RelayService {
     );
     let handle: CursorRunHandle;
     try {
+      const cursorTask = buildCursorWorkspaceTask(
+        run.task,
+        run.targetLocations ?? [],
+        run.permission,
+      );
       handle = run.parentRunId
-        ? await this.sdk.reply(run.agentId, run.task, launchOptions)
-        : await this.sdk.start(run.task, launchOptions);
+        ? await this.sdk.reply(run.agentId, cursorTask, launchOptions)
+        : await this.sdk.start(cursorTask, launchOptions);
       const applied = await this.patchRun(
         run.relayRunId,
         {

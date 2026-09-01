@@ -17,9 +17,11 @@ put `CURSOR_API_KEY` in the MCP declaration.
 
 After installing or reinstalling the plugin, create a new Codex task. Codex loads
 the bundled Skill and starts the built-in MCP automatically. It sends only the
-workspace path, task, model, permission, and idempotency data; the Cursor Agent
-reads the authorized workspace itself, so callers should not embed source files in
-MCP arguments. An explicit request for Cursor to review a current or named
+workspace path, `targetLocations` (files, directories, or line locations), a
+bounded `task` scope, model, permission, and idempotency data. The Cursor Agent
+reads the authorized workspace itself. Both `read-only` and `workspace-write`
+reject source text, code fences, file contents, and diffs in MCP arguments. An
+explicit request for Cursor to review a current or named
 workspace authorizes in-scope reading, not secrets, unrelated paths, or edits. An
 explicit request to modify or fix must map to `workspace-write`, not be silently
 downgraded to analysis. Outside the static allowlist, `authorize_workspace`
@@ -67,11 +69,18 @@ history, logs, or the repository. When using stored login, omit
 
 The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
 
+For `start_run` and `reply_run`, `task` means review/implementation scope and
+acceptance requirements, never file contents. Use `targetLocations` for
+workspace-relative files, directories, or line locations. If a reply omits them,
+it inherits the parent locations. The Relay builds the Cursor instruction so the
+agent reads the authorized workspace directly; authorization does not relax this
+contract for either read-only or read/write runs.
+
 `doctor` reports the effective `defaultTimeoutMs` and `maxTimeoutMs`. Ordinary
 repository work should normally omit `timeoutMs` and use the configured default
-(2 hours by default); tasks expected to run longer may request a larger explicit
-budget when it is within the configured maximum. A `wait_run` timeout is only a
-polling slice. Retryable SDK reconnects are returned as
+(24 hours by default and also the hard maximum). Callers may request a shorter
+explicit budget when appropriate, but cannot raise a run above 24 hours. A
+`wait_run` timeout is only a polling slice. Retryable SDK reconnects are returned as
 `connection.state=reconnecting` and remain non-terminal.
 While status and events show healthy progress, callers should keep waiting within
 the run budget instead of cancelling or creating short continuation runs.

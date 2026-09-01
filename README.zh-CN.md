@@ -52,15 +52,15 @@ node --input-type=module --eval 'import { Cursor } from "@cursor/sdk"; console.l
 | `CURSOR_API_KEY`                               | 无                    | 可选环境 Key；未设置时使用官方 stored login                                                            |
 | `CURSOR_RELAY_WORKSPACE_ROOTS`                 | 空                    | `path.delimiter` 分隔的无人值守允许根目录；为空时仍可使用当前对话的精确工作区读写授权                  |
 | `CURSOR_RELAY_STATE_DIR`                       | `~/.cursor-relay-mcp` | Relay 与 Cursor SDK 持久状态目录                                                                       |
-| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`              | `7200000`             | 默认总运行超时                                                                                         |
-| `CURSOR_RELAY_MAX_TIMEOUT_MS`                  | `14400000`            | 允许的最大总超时                                                                                       |
+| `CURSOR_RELAY_DEFAULT_TIMEOUT_MS`              | `86400000`            | 默认总运行超时（24 小时）                                                                              |
+| `CURSOR_RELAY_MAX_TIMEOUT_MS`                  | `86400000`            | 允许的最大总超时；可配置得更短，但硬上限为 24 小时                                                     |
 | `CURSOR_RELAY_MAX_EVENTS`                      | `1000`                | 每个运行保留的最大事件数                                                                               |
 | `CURSOR_RELAY_ENABLE_DANGER_FULL_ACCESS`       | `false`               | 服务端危险权限总开关；仅接受严格的 `true`/`false`                                                      |
 | `CURSOR_RELAY_READ_ONLY_SANDBOX_ENABLED`       | 平台自适应            | 只读预设是否启用 SDK 沙箱；Windows 因当前 SDK 不兼容而强制为 `false`，其他平台默认 `true` 且可显式关闭 |
 | `CURSOR_RELAY_WORKSPACE_WRITE_SANDBOX_ENABLED` | 平台自适应            | 读写预设是否启用 SDK 沙箱；Windows 因当前 SDK 不兼容而强制为 `false`，其他平台默认 `true` 且可显式关闭 |
 | `CURSOR_RELAY_SETTING_SOURCES`                 | `project`             | 逗号分隔的设置层，仅允许 `project`、`team`、`mdm`                                                      |
 
-所有已设置的数字和布尔配置必须合法，否则服务启动失败；不会静默回退。默认超时不能大于最大超时。
+所有已设置的数字和布尔配置必须合法，否则服务启动失败；不会静默回退。默认超时不能大于最大超时，最大超时不能超过 24 小时。
 
 ## MCP 配置
 
@@ -115,12 +115,14 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 
 ```text
 用户点名 Cursor/模型和工作区
-  → Codex 调用内置 MCP（只传 workspace、任务、模型、权限和幂等键）
+  → Codex 调用内置 MCP（只传 workspace、targetLocations、任务范围、模型、权限和幂等键）
   → Cursor Agent 在该工作区内自行读取或修改
   → Codex 循环 wait_run、增量读取 read_events、跟踪变更文件并核验结果
 ```
 
-Codex 不应把源码正文复制到 MCP 参数中。用户明确要求 Cursor 审查当前或指定工作区，表示允许 Cursor 在该范围内自行读取；用户明确说“让 Cursor 修改/修复/实现”时，表示允许 Cursor 在该精确工作区内自行读写，应选择 `workspace-write`，不能擅自降成只读分析。白名单外由 `authorize_workspace` 签发当前对话可复用的 capability；Codex 后续只需传工作区、任务、模型、匹配的权限、幂等键和同一 token，让 Cursor 自行完成多轮修改。
+`task` 只描述审查/实现范围与验收要求，`targetLocations` 只列工作区内文件、目录或行号位置。无论 `read-only` 还是 `workspace-write`，都禁止把源码正文、代码块、文件内容或 diff 放进任何 MCP 参数；Relay 会拒绝违规请求，并让 Cursor 在获授权工作区自行读取。续接运行省略 `targetLocations` 时继承父运行的位置。
+
+用户明确要求 Cursor 审查当前或指定工作区，表示允许 Cursor 在该范围内自行读取；用户明确说“让 Cursor 修改/修复/实现”时，表示允许 Cursor 在该精确工作区内自行读写，应选择 `workspace-write`，不能擅自降成只读分析。白名单外由 `authorize_workspace` 签发当前对话可复用的 capability；授权只绑定工作区与权限上限，不会放宽“仅位置与范围”的任务契约。
 
 ## 工具合约
 
@@ -129,8 +131,8 @@ Codex 不应把源码正文复制到 MCP 参数中。用户明确要求 Cursor �
 | `doctor`              | 检查认证、状态目录和工作区白名单，不请求模型            |
 | `list_models`         | 发现当前账户可用模型和参数                              |
 | `authorize_workspace` | 为当前对话和精确工作区签发可复用的只读或读写 capability |
-| `start_run`           | 启动模型明确、权限明确且有幂等键的运行                  |
-| `reply_run`           | 续接已结束的 Agent 会话                                 |
+| `start_run`           | 仅用目标位置、任务范围、明确权限和幂等键启动运行        |
+| `reply_run`           | 仅用目标位置与任务范围续接已结束的 Agent 会话           |
 | `get_run`             | 读取状态并在重启后重连                                  |
 | `view_run`            | 打开只读实时面板查看既有运行                            |
 | `wait_run`            | 最多等待 30 秒，直到 `terminal=true`                    |
@@ -144,7 +146,7 @@ Codex 不应把源码正文复制到 MCP 参数中。用户明确要求 Cursor �
 
 `start_run` 与 `reply_run` 返回结果会绑定同一个 MCP Apps 只读面板；`view_run` 可按 `relayRunId` 再次打开。面板只调用 `wait_run` 和 `read_events`，展示真实 Relay 状态、模型、权限、耗时、Cursor SDK 增量事件、token 使用量、错误和最终输出，不会授权、启动、续接或取消运行。不支持 MCP Apps 的宿主仍可使用原有结构化工具结果。
 
-`doctor` 会返回实际生效的 `defaultTimeoutMs` 与 `maxTimeoutMs`。普通仓库任务应省略 `timeoutMs`，使用配置默认值（默认 2 小时），不应擅自压缩为 10 分钟；预计耗时更长时可在 `maxTimeoutMs` 内显式选择更大预算。单次 `wait_run` 超时只是轮询切片；可重试的 SDK 重连异常会返回 `connection.state=reconnecting` 并保持运行非终态。只要运行状态与事件持续正常推进，就应在总预算内继续等待，不应因已等待 10 分钟而取消或拆成多个短续接运行；真正达到总预算是执行超时，不代表任务推理在语义上失败。
+`doctor` 会返回实际生效的 `defaultTimeoutMs` 与 `maxTimeoutMs`。普通仓库任务必须省略 `timeoutMs`，使用默认 24 小时总预算；只有用户或任务确实要求更短预算时才显式传入，任何运行都不能超过 24 小时硬上限。单次 `wait_run` 超时只是轮询切片；可重试的 SDK 重连异常会返回 `connection.state=reconnecting` 并保持运行非终态。只要运行状态与事件持续正常推进，就应在总预算内继续等待，不应因已等待 10 分钟、2 小时或 4 小时而取消或拆成多个短续接运行；真正达到 24 小时总预算才是执行超时，不代表任务推理在语义上失败。
 
 锁定的公开 Cursor SDK 当前没有向正在执行的本地 Agent run 注入新指令的操作；`doctor.capabilities.activeRunSteering` 因此明确为 `false`。Relay 不会把内部事件追加伪装成“纠偏指令已送达”。调用方也不应仅为调整方向就取消活动运行：应继续观察至终态，再用 `reply_run` 续接；只有用户明确要求停止，或继续执行将跨越具体安全边界时才取消。
 

@@ -4,6 +4,8 @@ import { realpath } from "node:fs/promises";
 import { RelayError } from "./errors.js";
 import type { CodexControlledTool, PermissionPreset } from "./types.js";
 
+export const CURSOR_RELAY_HARD_MAX_TIMEOUT_MS = 24 * 60 * 60_000;
+
 export interface RelayConfig {
   environmentApiKeyConfigured: boolean;
   stateDir: string;
@@ -26,13 +28,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
   const defaultTimeoutMs = positiveInt(
     "CURSOR_RELAY_DEFAULT_TIMEOUT_MS",
     env.CURSOR_RELAY_DEFAULT_TIMEOUT_MS,
-    2 * 60 * 60_000,
+    CURSOR_RELAY_HARD_MAX_TIMEOUT_MS,
   );
   const maxTimeoutMs = positiveInt(
     "CURSOR_RELAY_MAX_TIMEOUT_MS",
     env.CURSOR_RELAY_MAX_TIMEOUT_MS,
-    4 * 60 * 60_000,
+    CURSOR_RELAY_HARD_MAX_TIMEOUT_MS,
   );
+  if (maxTimeoutMs > CURSOR_RELAY_HARD_MAX_TIMEOUT_MS) {
+    throw new RelayError(
+      "CONFIG_INVALID",
+      `CURSOR_RELAY_MAX_TIMEOUT_MS 不能超过 ${CURSOR_RELAY_HARD_MAX_TIMEOUT_MS}（24 小时）`,
+    );
+  }
   if (defaultTimeoutMs > maxTimeoutMs) {
     throw new RelayError(
       "CONFIG_INVALID",

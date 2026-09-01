@@ -122,6 +122,7 @@ class FakeSdk implements CursorSdkPort {
   ];
   readonly runs = new Map<string, FakeRun>();
   launches: AgentLaunchOptions[] = [];
+  tasks: string[] = [];
   listModelsCalls = 0;
   nextEvents: CursorEvent[] = [];
   nextStreamError: Error | undefined;
@@ -140,10 +141,12 @@ class FakeSdk implements CursorSdkPort {
     this.listModelsCalls += 1;
     return this.models;
   }
-  async start(_task: string, options: AgentLaunchOptions) {
+  async start(task: string, options: AgentLaunchOptions) {
+    this.tasks.push(task);
     return this.create(options);
   }
-  async reply(_agentId: string, _task: string, options: AgentLaunchOptions) {
+  async reply(_agentId: string, task: string, options: AgentLaunchOptions) {
+    this.tasks.push(task);
     return this.create(options);
   }
   async getRun(runId: string) {
@@ -262,6 +265,98 @@ test("model validation, permission mapping, idempotency and wait contract", asyn
   }
 });
 
+test("task contract passes only locations and scope while Cursor reads the workspace", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      targetLocations: ["src/auth.ts:10-80", "tests/auth.test.ts"],
+      task: "审查认证错误处理与测试覆盖\n- 检查失败路径\n- 给出验证结论",
+      model: { id: "cursor-test" },
+      permission: "read-only",
+      idempotencyKey: "location-scope-contract",
+    });
+    assert.equal(
+      started.run.task,
+      "审查认证错误处理与测试覆盖\n- 检查失败路径\n- 给出验证结论",
+    );
+    assert.deepEqual(started.run.targetLocations, [
+      "src/auth.ts:10-80",
+      "tests/auth.test.ts",
+    ]);
+    assert.match(item.sdk.tasks[0] ?? "", /自行使用工具读取所需文件/u);
+    assert.match(item.sdk.tasks[0] ?? "", /src\/auth\.ts:10-80/u);
+    assert.match(item.sdk.tasks[0] ?? "", /仅审查和分析，不修改工作区/u);
+    assert.equal((item.sdk.tasks[0] ?? "").includes("源码正文："), false);
+
+    item.sdk.runs
+      .get(started.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "reviewed" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+
+    const reply = await item.service.replyRun({
+      parentRunId: started.run.relayRunId,
+      task: "复核相同文件的剩余风险",
+      idempotencyKey: "location-scope-reply",
+    });
+    assert.deepEqual(reply.run.targetLocations, started.run.targetLocations);
+    assert.match(item.sdk.tasks[1] ?? "", /tests\/auth\.test\.ts/u);
+    item.sdk.runs
+      .get(reply.run.sdkRunId ?? "")
+      ?.finish({ status: "finished", result: "replied" });
+    await item.service.waitRun(reply.run.relayRunId, 2_000);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("task contract rejects embedded source for read and write permissions", async () => {
+  const item = await fixture();
+  try {
+    for (const permission of ["read-only", "workspace-write"] as const) {
+      await assert.rejects(
+        item.service.startRun({
+          workspace: item.dir,
+          task: "审查以下实现：\n```ts\nconst secret = 1;\n```",
+          model: { id: "cursor-test" },
+          permission,
+          idempotencyKey: `embedded-source-${permission}`,
+        }),
+        (error: unknown) =>
+          error instanceof RelayError &&
+          error.code === "TASK_CONTRACT_VIOLATION",
+      );
+    }
+    await assert.rejects(
+      item.service.startRun({
+        workspace: item.dir,
+        targetLocations: ["src/auth.ts\nconst pasted = true;"],
+        task: "审查认证实现",
+        model: { id: "cursor-test" },
+        permission: "workspace-write",
+        idempotencyKey: "embedded-location-source",
+      }),
+      (error: unknown) =>
+        error instanceof RelayError && error.code === "TASK_CONTRACT_VIOLATION",
+    );
+    await assert.rejects(
+      item.service.startRun({
+        workspace: item.dir,
+        targetLocations: ["../unrelated/secrets.ts"],
+        task: "审查工作区文件",
+        model: { id: "cursor-test" },
+        permission: "read-only",
+        idempotencyKey: "outside-location",
+      }),
+      (error: unknown) =>
+        error instanceof RelayError && error.code === "TASK_CONTRACT_VIOLATION",
+    );
+    assert.equal(item.sdk.tasks.length, 0);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
 test("explicit conversation approval grants reusable read/write access outside static roots", async () => {
   const item = await fixture();
   const outside = await mkdtemp(join(tmpdir(), "cursor-relay-approved-"));
@@ -327,6 +422,10 @@ test("explicit conversation approval grants reusable read/write access outside s
     assert.equal(grant.authorizationRequired, true);
     assert.equal(grant.source, "conversation-capability");
     assert.ok("token" in grant && grant.token);
+    assert.match(
+      "instruction" in grant ? grant.instruction : "",
+      /只传 targetLocations 与 task 范围/u,
+    );
 
     await assert.rejects(
       item.service.startRun(
@@ -365,6 +464,7 @@ test("explicit conversation approval grants reusable read/write access outside s
       {
         workspace: outside,
         task: "第一次修改 PackCAD",
+        targetLocations: ["src/cli.ts", "tests/cli.test.ts"],
         model: { id: "cursor-test" },
         permission: "workspace-write",
         idempotencyKey: "packcad-first-write",
@@ -385,6 +485,8 @@ test("explicit conversation approval grants reusable read/write access outside s
       ),
       false,
     );
+    assert.match(item.sdk.tasks.at(-1) ?? "", /直接修改获授权工作区/u);
+    assert.match(item.sdk.tasks.at(-1) ?? "", /src\/cli\.ts/u);
 
     item.sdk.runs
       .get(started.run.sdkRunId ?? "")

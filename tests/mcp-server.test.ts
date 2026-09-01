@@ -142,6 +142,24 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
       assert.equal(ui?.resourceUri, RUN_PANEL_URI);
       assert.equal(tool?._meta?.["openai/outputTemplate"], RUN_PANEL_URI);
     }
+    for (const name of ["start_run", "reply_run"]) {
+      const tool = tools.tools.find((item) => item.name === name);
+      const properties = (tool?.inputSchema.properties ?? {}) as Record<
+        string,
+        { description?: unknown }
+      >;
+      const timeout = tool?.inputSchema.properties?.timeoutMs as
+        | { maximum?: unknown; description?: unknown }
+        | undefined;
+      assert.equal(timeout?.maximum, 86_400_000);
+      assert.match(String(timeout.description), /24 小时/u);
+      assert.match(String(properties.task?.description), /禁止传源码正文/u);
+      assert.match(
+        String(properties.targetLocations?.description),
+        /仅传位置不传内容/u,
+      );
+      assert.equal("sourceContent" in properties, false);
+    }
     for (const name of ["get_run", "wait_run", "read_events"]) {
       const tool = tools.tools.find((item) => item.name === name);
       const ui = tool?._meta?.ui as { visibility?: unknown } | undefined;

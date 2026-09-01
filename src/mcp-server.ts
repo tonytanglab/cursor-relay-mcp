@@ -1,7 +1,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
+import { CURSOR_RELAY_HARD_MAX_TIMEOUT_MS } from "./config.js";
 import { asRelayError } from "./errors.js";
 import type { RelayService } from "./relay-service.js";
+import {
+  TARGET_LOCATION_MAX_CHARS,
+  TARGET_LOCATIONS_MAX_ITEMS,
+  TASK_SCOPE_MAX_CHARS,
+  targetLocationIsAllowed,
+  taskScopeContainsEmbeddedSource,
+} from "./task-contract.js";
 import {
   RUN_PANEL_HTML,
   RUN_PANEL_MIME_TYPE,
@@ -25,6 +33,43 @@ const codexControlledToolSchema = z.enum([
   "mcp",
   "generateImage",
 ]);
+const timeoutSchema = z
+  .number()
+  .int()
+  .min(1_000)
+  .max(CURSOR_RELAY_HARD_MAX_TIMEOUT_MS)
+  .optional()
+  .describe(
+    "Cursor 任务总预算（毫秒）；普通任务省略即可使用 24 小时默认值，硬上限同为 24 小时。",
+  );
+const taskScopeSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(TASK_SCOPE_MAX_CHARS)
+  .refine((value) => !taskScopeContainsEmbeddedSource(value), {
+    message:
+      "task 只能描述审查、修改与验收范围，禁止嵌入源码正文、代码块或补丁；Cursor 会自行读取工作区",
+  })
+  .describe(
+    "任务或审查范围与验收要求；禁止传源码正文、代码块或补丁，由 Cursor 在获授权工作区自行读取。",
+  );
+const targetLocationsSchema = z
+  .array(
+    z
+      .string()
+      .trim()
+      .min(1)
+      .max(TARGET_LOCATION_MAX_CHARS)
+      .refine(targetLocationIsAllowed, {
+        message: "只能传工作区内文件、目录或行号位置，禁止多行文本或源码正文",
+      }),
+  )
+  .max(TARGET_LOCATIONS_MAX_ITEMS)
+  .optional()
+  .describe(
+    "工作区内的文件、目录或行号位置列表，仅传位置不传内容；省略表示由 Cursor 按任务范围在工作区内定位。",
+  );
 
 export function createMcpServer(service: RelayService): McpServer {
   const server = new McpServer({ name: "cursor-relay-mcp", version: "0.1.1" });
@@ -80,7 +125,7 @@ export function createMcpServer(service: RelayService): McpServer {
     "authorize_workspace",
     {
       description:
-        "仅当用户在当前对话明确要求 Cursor Relay 读取或修改该工作区时调用。签发绑定当前 MCP 对话与精确工作区的可复用授权；支持 read-only 与 workspace-write，不授予危险权限，进程结束即失效。",
+        "仅当用户在当前对话明确要求 Cursor Relay 读取或修改该工作区时调用。签发绑定当前 MCP 对话与精确工作区的可复用授权；read-only 与 workspace-write 均只传位置和范围，禁止传源码正文，由 Cursor 自行读取；不授予危险权限，进程结束即失效。",
       inputSchema: {
         workspace: z.string().min(1),
         permission: z.enum(["read-only", "workspace-write"]).optional(),
@@ -96,10 +141,11 @@ export function createMcpServer(service: RelayService): McpServer {
     "start_run",
     {
       description:
-        "在允许的本地工作区启动持久 Cursor Agent 运行。默认只读；修改任务使用 workspace-write，并要求 Cursor 自行检查工作区、直接修改、验证并报告变更文件；必须显式选择模型和幂等键。",
+        "在允许的本地工作区启动持久 Cursor Agent 运行。read-only 与 workspace-write 均只接受工作区、目标位置和任务范围，禁止嵌入源码正文；Cursor 自行读取所需文件。必须显式选择模型和幂等键。",
       inputSchema: {
         workspace: z.string().min(1),
-        task: z.string().min(1),
+        task: taskScopeSchema,
+        targetLocations: targetLocationsSchema,
         model: modelSchema,
         permission: permissionSchema.optional(),
         codexAllowedTools: z
@@ -112,7 +158,7 @@ export function createMcpServer(service: RelayService): McpServer {
         confirmedDangerousPermission: z.boolean().optional(),
         workspaceApprovalToken: z.string().min(32).max(200).optional(),
         idempotencyKey: z.string().min(8).max(200),
-        timeoutMs: z.number().int().optional(),
+        timeoutMs: timeoutSchema,
       },
       annotations: mutatingAnnotations(true),
       _meta: runPanelMeta("正在启动 Cursor…", "Cursor 运行已启动"),
@@ -126,10 +172,11 @@ export function createMcpServer(service: RelayService): McpServer {
     "reply_run",
     {
       description:
-        "在一个已结束的 Cursor Agent 会话中发起后续运行，并保留同一 agentId。",
+        "在已结束的 Cursor Agent 会话中续接运行并保留 agentId；只传目标位置与任务范围，禁止源码正文，由 Cursor 自行读取。",
       inputSchema: {
         parentRunId: z.string().min(1),
-        task: z.string().min(1),
+        task: taskScopeSchema,
+        targetLocations: targetLocationsSchema,
         model: modelSchema.optional(),
         permission: permissionSchema.optional(),
         codexAllowedTools: z
@@ -142,7 +189,7 @@ export function createMcpServer(service: RelayService): McpServer {
         confirmedDangerousPermission: z.boolean().optional(),
         workspaceApprovalToken: z.string().min(32).max(200).optional(),
         idempotencyKey: z.string().min(8).max(200),
-        timeoutMs: z.number().int().optional(),
+        timeoutMs: timeoutSchema,
       },
       annotations: mutatingAnnotations(true),
       _meta: runPanelMeta("正在续接 Cursor…", "Cursor 后续运行已启动"),

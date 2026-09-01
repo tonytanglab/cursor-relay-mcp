@@ -25,6 +25,7 @@ try {
   const viewTool = tools.tools.find((tool) => tool.name === "view_run");
   const waitTool = tools.tools.find((tool) => tool.name === "wait_run");
   const eventsTool = tools.tools.find((tool) => tool.name === "read_events");
+  const startProperties = startTool?.inputSchema?.properties;
   if (
     doctorTool?.annotations?.readOnlyHint !== true ||
     authorizeTool?.annotations?.readOnlyHint !== false ||
@@ -39,6 +40,14 @@ try {
     eventsTool?._meta?.["openai/widgetAccessible"] !== true
   )
     throw new Error("tool annotations missing");
+  if (
+    typeof startProperties !== "object" ||
+    startProperties === null ||
+    !("targetLocations" in startProperties) ||
+    !("task" in startProperties) ||
+    "sourceContent" in startProperties
+  )
+    throw new Error("location-only task contract missing");
   const resources = await client.listResources();
   const panel = resources.resources.find(
     (resource) => resource.uri === "ui://cursor-relay/run-panel-v1.html",
@@ -67,14 +76,18 @@ try {
     typeof doctorData !== "object" ||
     doctorData === null ||
     !("defaultTimeoutMs" in doctorData) ||
-    doctorData.defaultTimeoutMs !== 7_200_000 ||
+    doctorData.defaultTimeoutMs !== 86_400_000 ||
     !("maxTimeoutMs" in doctorData) ||
-    doctorData.maxTimeoutMs !== 14_400_000 ||
+    doctorData.maxTimeoutMs !== 86_400_000 ||
     !("capabilities" in doctorData) ||
     typeof doctorData.capabilities !== "object" ||
     doctorData.capabilities === null ||
     !("liveRunPanel" in doctorData.capabilities) ||
     doctorData.capabilities.liveRunPanel !== true ||
+    !("workspaceReadsSourceDirectly" in doctorData.capabilities) ||
+    doctorData.capabilities.workspaceReadsSourceDirectly !== true ||
+    !("embeddedSourceArgumentsRejected" in doctorData.capabilities) ||
+    doctorData.capabilities.embeddedSourceArgumentsRejected !== true ||
     !("activeRunSteering" in doctorData.capabilities) ||
     doctorData.capabilities.activeRunSteering !== false
   )
@@ -96,7 +109,10 @@ try {
     !("permission" in approvalData) ||
     approvalData.permission !== "workspace-write" ||
     !("source" in approvalData) ||
-    approvalData.source !== "conversation-capability"
+    approvalData.source !== "conversation-capability" ||
+    !("instruction" in approvalData) ||
+    typeof approvalData.instruction !== "string" ||
+    !approvalData.instruction.includes("禁止嵌入源码正文")
   )
     throw new Error("authorize_workspace capability missing");
   process.stdout.write(`MCP smoke passed (${tools.tools.length} tools)\n`);

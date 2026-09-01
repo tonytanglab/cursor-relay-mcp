@@ -40,6 +40,7 @@ export interface RelayRun {
   agentId: string;
   workspace: string;
   task: string;
+  targetLocations?: string[] | undefined;
   model: ModelSelection;
   permission: PermissionPreset;
   codexAllowedTools?: CodexControlledTool[] | undefined;
@@ -86,6 +87,7 @@ export interface PersistedState {
 export interface StartRunInput {
   workspace: string;
   task: string;
+  targetLocations?: string[] | undefined;
   model: ModelSelection;
   permission?: PermissionPreset | undefined;
   codexAllowedTools?: CodexControlledTool[] | undefined;

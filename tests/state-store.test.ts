@@ -63,6 +63,7 @@ test("state store serializes concurrent atomic updates", async () => {
         agentId: "agent",
         workspace: dir,
         task: "test",
+        targetLocations: ["src/index.ts:1-40"],
         model: { id: "model" },
         permission: "read-only",
         codexAllowedTools: ["generateImage"],
@@ -93,6 +94,7 @@ test("state store serializes concurrent atomic updates", async () => {
     assert.ok(run);
     assert.equal(run.events.length, 10);
     assert.deepEqual(run.codexAllowedTools, ["generateImage"]);
+    assert.deepEqual(run.targetLocations, ["src/index.ts:1-40"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

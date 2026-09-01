@@ -310,7 +310,7 @@ Local SDK sandboxing was requested, but sandboxing is not supported in this envi
 
 ## 九、新任务中完成 Grok 4.6 冒烟测试
 
-插件安装或重装后必须新建 Codex 任务。旧任务不会动态获得新插件的 skills、MCP 工具或实时运行面板。新任务中的 `start_run` / `reply_run` 会附带只读进度卡片，也可按 `relayRunId` 调用 `view_run` 随时重开；可重试的 SDK 短暂断连会以 `connection.state=reconnecting` 保持非终态并继续轮询。
+插件安装或重装后必须新建 Codex 任务。旧任务不会动态获得新插件的 skills、MCP 工具或实时运行面板。新任务中的 `doctor` 应显示 `defaultTimeoutMs=86400000` 与 `maxTimeoutMs=86400000`；普通 `start_run` / `reply_run` 省略 `timeoutMs` 即使用 24 小时总预算，任何显式值也不能超过 24 小时。运行会附带只读进度卡片，也可按 `relayRunId` 调用 `view_run` 随时重开；可重试的 SDK 短暂断连会以 `connection.state=reconnecting` 保持非终态并继续轮询。
 
 在新任务中输入：
 
@@ -319,9 +319,10 @@ Local SDK sandboxing was requested, but sandboxing is not supported in this envi
 1. 调用 doctor；
 2. 调用 list_models，确认账户实际返回的 Grok 4.6 canonical ID；
 3. 对当前工作区签发当前对话可复用的 read-only 授权（如工作区不在静态白名单）；
-4. 使用 Grok 4.6 读取 package.json，只回复 package name 和锁定的 @cursor/sdk 版本；
-5. 重复调用 wait_run，直到 terminal=true；
-6. 返回 effectiveModel.id、status 和 assistantText，禁止修改任何文件。
+4. start_run 只传 workspace、targetLocations=["package.json"] 和任务范围，禁止粘贴 package.json 正文；
+5. 使用 Grok 4.6 自行读取 package.json，只回复 package name 和锁定的 @cursor/sdk 版本；
+6. 重复调用 wait_run，直到 terminal=true；
+7. 返回 effectiveModel.id、status 和 assistantText，禁止修改任何文件。
 ```
 
 模型目录来自当前 Cursor 账户，可能变化。必须先调用 `list_models`，不要仅凭文档硬编码模型 ID。2026-08-26 的实测 canonical ID 是 `grok-4.6`，默认有效参数组合包括：
@@ -360,7 +361,7 @@ doctor → list_models → authorize_workspace（按需）→ start_run → wait
 
 - `authorize_workspace` 的 token 绑定当前 MCP task/session 与规范化工作区，可在本对话的多次运行中复用，作用域或 MCP 进程结束后失效。
 - `workspace-write` capability 同时允许读写与只读运行；`read-only` capability 不能提升为写入。
-- 每次 `start_run` / `reply_run` 仍需使用具体任务和独立幂等键；Codex 不复制源码，只跟踪事件和变更文件清单。
+- 无论只读还是读写授权，每次 `start_run` / `reply_run` 都只传 `targetLocations` 和 `task` 范围，并使用独立幂等键；禁止源码正文、代码块和 diff，Cursor 在获授权工作区自行读取。
 - `wait_run` 最多等待 30 秒；当 `mustCallAgain=true` 时必须继续调用，不能把一次超时当成运行失败。
 - 重试同一个逻辑请求必须复用原 `idempotencyKey`；不同任务必须使用新键。
 - 不要把授权 token 或任何密钥写入日志、状态说明或仓库。

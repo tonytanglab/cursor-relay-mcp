@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   authorizeWorkspace,
+  CURSOR_RELAY_HARD_MAX_TIMEOUT_MS,
   loadConfig,
   normalizeCursorApiKeyEnvironment,
   permissionOptions,
@@ -80,10 +81,10 @@ test("permission presets fail closed", () => {
   );
 });
 
-test("default timeout supports multi-hour Cursor runs", () => {
+test("default timeout gives Cursor a 24-hour total budget and hard cap", () => {
   const config = loadConfig({});
-  assert.equal(config.defaultTimeoutMs, 2 * 60 * 60_000);
-  assert.equal(config.maxTimeoutMs, 4 * 60 * 60_000);
+  assert.equal(config.defaultTimeoutMs, CURSOR_RELAY_HARD_MAX_TIMEOUT_MS);
+  assert.equal(config.maxTimeoutMs, CURSOR_RELAY_HARD_MAX_TIMEOUT_MS);
 });
 
 test("config does not infer workspace roots", () => {
@@ -161,6 +162,18 @@ test("configuration fails fast for invalid booleans, numbers and setting sources
         CURSOR_RELAY_MAX_TIMEOUT_MS: "1000",
       }),
     /不能大于/u,
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        CURSOR_RELAY_DEFAULT_TIMEOUT_MS: String(
+          CURSOR_RELAY_HARD_MAX_TIMEOUT_MS,
+        ),
+        CURSOR_RELAY_MAX_TIMEOUT_MS: String(
+          CURSOR_RELAY_HARD_MAX_TIMEOUT_MS + 1,
+        ),
+      }),
+    /不能超过 .*24 小时/u,
   );
   assert.deepEqual(
     loadConfig({
