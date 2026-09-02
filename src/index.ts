@@ -13,6 +13,7 @@ export { CursorSdkAdapter } from "./cursor-sdk-adapter.js";
 export { RelayError } from "./errors.js";
 export { createMcpServer } from "./mcp-server.js";
 export { RelayService } from "./relay-service.js";
+export { warmCursorSdkRuntime } from "./sdk-runtime/index.js";
 export { StateStore } from "./state-store.js";
 export { WorkspaceApprovalBroker } from "./workspace-approval.js";
 export type * from "./sdk-port.js";
@@ -21,10 +22,15 @@ export type * from "./types.js";
 export async function main() {
   normalizeCursorApiKeyEnvironment();
   const config = loadConfig();
+  const sdk = new CursorSdkAdapter(
+    config.stateDir,
+    config.environmentApiKeyConfigured,
+  );
+  await sdk.warmup();
   const service = new RelayService(
     config,
     new StateStore(config.stateDir),
-    new CursorSdkAdapter(config.stateDir, config.environmentApiKeyConfigured),
+    sdk,
   );
   await createMcpServer(service).connect(new StdioServerTransport());
 }

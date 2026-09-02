@@ -1,9 +1,10 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const required = [
   "dist/index.js",
   "dist/index.d.ts",
+  "dist/sdk-runtime/index.js",
   ".codex-plugin/plugin.json",
   ".mcp.json",
   "skills/delegate-to-cursor-agent/SKILL.md",
@@ -22,6 +23,11 @@ if (sdkVersion !== "1.0.30")
   );
 if (/[~^*><=]/u.test(sdkVersion))
   throw new Error("@cursor/sdk 不能使用版本范围");
+
+const sdkRuntimeDirectory = resolve("node_modules/@cursor/sdk/dist/esm");
+const sdkRuntimeEntries = await readdir(sdkRuntimeDirectory);
+if (!sdkRuntimeEntries.some((name) => /^\d+\.js$/u.test(name)))
+  throw new Error("@cursor/sdk 缺少运行所需的懒加载数字分块");
 
 const manifest = JSON.parse(
   await readFile(resolve(".codex-plugin/plugin.json"), "utf8"),

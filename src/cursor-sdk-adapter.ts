@@ -20,6 +20,7 @@ import type {
   CursorRunHandle,
   CursorSdkPort,
 } from "./sdk-port.js";
+import { warmCursorSdkRuntime } from "./sdk-runtime/index.js";
 
 export class CursorSdkAdapter implements CursorSdkPort {
   private readonly store: JsonlLocalAgentStore;
@@ -28,6 +29,10 @@ export class CursorSdkAdapter implements CursorSdkPort {
   constructor(stateDir: string, environmentApiKeyConfigured = false) {
     this.store = new JsonlLocalAgentStore(resolve(stateDir, "cursor-sdk"));
     this.environmentApiKeyConfigured = environmentApiKeyConfigured;
+  }
+
+  async warmup(cwd = process.cwd()): Promise<void> {
+    await sdkCall(() => warmCursorSdkRuntime(this.store, cwd));
   }
 
   async authStatus() {

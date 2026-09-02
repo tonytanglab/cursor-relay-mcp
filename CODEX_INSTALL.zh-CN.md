@@ -393,22 +393,24 @@ cachebuster 是本地重装标识，不应叠加多个后缀，也不应为了�
 
 ## 十二、故障速查
 
-| 现象                                                  | 原因                                                                                  | 处理                                                                                              |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `plugin list` 显示版本为空                            | marketplace 条目存在，但 `%USERPROFILE%\plugins\cursor-relay-mcp` 不存在或无 manifest | 把仓库放到正确路径，或建立目录联接                                                                |
-| 误把仓库放进 `.agents\plugins`                        | 混淆 marketplace 清单目录与插件源目录                                                 | 移到 `%USERPROFILE%\plugins`；清理重复副本前先核验路径                                            |
-| `codex.exe` 拒绝访问                                  | 命中 WindowsApps 受保护的桌面版内部路径                                               | 使用 `.codex\plugins\.plugin-appserver\codex.exe`，或更新 Codex                                   |
-| `logged-out`                                          | 当前 Windows 用户没有 Cursor stored login                                             | 在插件目录执行 `Cursor.auth.login()`                                                              |
-| `CURSOR_ACCOUNT_PLAN_REQUIRED` 且桌面端已是 Pro       | SDK stored login 与桌面端是两份独立登录，当前 SDK 凭据可能属于另一账户                | 核对 `doctor.authenticationEmail`；经用户确认后调用 `reauthenticate_cursor`，再复验 `list_models` |
-| `CURSOR_CONFIGURATION_ERROR` 提到 sandbox unsupported | 旧版插件仍在 Windows 强制启用 sandbox，或非 Windows 主机不支持                        | 更新并重装插件；非 Windows 仅为只读模式设置兼容环境变量                                           |
-| 安装后当前任务没有工具                                | 插件工具只在任务创建时加载                                                            | 新建 Codex 任务                                                                                   |
-| 再次安装仍运行旧内容                                  | manifest version 未变化，命中旧缓存                                                   | 使用单一 cachebuster 后缀重装                                                                     |
-| `WORKSPACE_APPROVAL_REQUIRED`                         | 工作区不在静态白名单且当前对话尚未签发 capability                                     | 当前对话明确授权后调用 `authorize_workspace`                                                      |
-| `WORKSPACE_APPROVAL_MISMATCH`                         | 工作区、权限上限或 MCP 对话 scope 不一致                                              | 使用本对话为该精确工作区签发的匹配 token                                                          |
-| `wait_run` 返回 `terminal=false`                      | 运行尚未结束，不是失败                                                                | 按 `mustCallAgain` 继续轮询                                                                       |
-| stored login 存在但仍认证失败                         | MCP 由不同 Windows 用户启动，或传了空 `CURSOR_API_KEY`                                | 使用同一用户并完全省略空 Key                                                                      |
-| `STATE_UPDATE_FAILED` 且系统码为 `EPERM/EACCES/EBUSY` | 旧版 Relay 单次原子替换失败，或目标状态文件被同步软件、杀毒软件等长时间占用           | 更新并重装插件；把状态目录放在本地非同步磁盘，再新建 Codex 任务                                   |
-| 状态目录遗留多个 `relay-state.json.*.tmp`             | 旧版进程在写完临时快照后未能替换目标，或在替换窗口退出                                | 先退出全部 Codex/Relay 进程，再把孤儿文件移动到备份目录                                           |
+| 现象                                                            | 原因                                                                                  | 处理                                                                                                |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `plugin list` 显示版本为空                                      | marketplace 条目存在，但 `%USERPROFILE%\plugins\cursor-relay-mcp` 不存在或无 manifest | 把仓库放到正确路径，或建立目录联接                                                                  |
+| 误把仓库放进 `.agents\plugins`                                  | 混淆 marketplace 清单目录与插件源目录                                                 | 移到 `%USERPROFILE%\plugins`；清理重复副本前先核验路径                                              |
+| `codex.exe` 拒绝访问                                            | 命中 WindowsApps 受保护的桌面版内部路径                                               | 使用 `.codex\plugins\.plugin-appserver\codex.exe`，或更新 Codex                                     |
+| `logged-out`                                                    | 当前 Windows 用户没有 Cursor stored login                                             | 在插件目录执行 `Cursor.auth.login()`                                                                |
+| `CURSOR_ACCOUNT_PLAN_REQUIRED` 且桌面端已是 Pro                 | SDK stored login 与桌面端是两份独立登录，当前 SDK 凭据可能属于另一账户                | 核对 `doctor.authenticationEmail`；经用户确认后调用 `reauthenticate_cursor`，再复验 `list_models`   |
+| `CURSOR_CONFIGURATION_ERROR` 提到 sandbox unsupported           | 旧版插件仍在 Windows 强制启用 sandbox，或非 Windows 主机不支持                        | 更新并重装插件；非 Windows 仅为只读模式设置兼容环境变量                                             |
+| 安装后当前任务没有工具                                          | 插件工具只在任务创建时加载                                                            | 新建 Codex 任务                                                                                     |
+| 再次安装仍运行旧内容                                            | manifest version 未变化，命中旧缓存                                                   | 使用单一 cachebuster 后缀重装                                                                       |
+| `resources/read ... Transport closed`，但新任务的 `doctor` 正常 | 历史任务绑定的 MCP 子进程已被 Codex 回收、重载，或仍指向升级时已清理的旧插件缓存      | 重新进入该任务触发 MCP 状态刷新；仍未恢复则新建任务。不要反复重装或重复提交模型运行                 |
+| 新任务也立即 `Transport closed`                                 | MCP 进程启动失败、构建缓存不完整，或 Node.js 版本不符合要求                           | 依次检查 `node --version`、`npm run build`、`npm run test:mcp`，再按 cachebuster 流程重装并新建任务 |
+| `WORKSPACE_APPROVAL_REQUIRED`                                   | 工作区不在静态白名单且当前对话尚未签发 capability                                     | 当前对话明确授权后调用 `authorize_workspace`                                                        |
+| `WORKSPACE_APPROVAL_MISMATCH`                                   | 工作区、权限上限或 MCP 对话 scope 不一致                                              | 使用本对话为该精确工作区签发的匹配 token                                                            |
+| `wait_run` 返回 `terminal=false`                                | 运行尚未结束，不是失败                                                                | 按 `mustCallAgain` 继续轮询                                                                         |
+| stored login 存在但仍认证失败                                   | MCP 由不同 Windows 用户启动，或传了空 `CURSOR_API_KEY`                                | 使用同一用户并完全省略空 Key                                                                        |
+| `STATE_UPDATE_FAILED` 且系统码为 `EPERM/EACCES/EBUSY`           | 旧版 Relay 单次原子替换失败，或目标状态文件被同步软件、杀毒软件等长时间占用           | 更新并重装插件；把状态目录放在本地非同步磁盘，再新建 Codex 任务                                     |
+| 状态目录遗留多个 `relay-state.json.*.tmp`                       | 旧版进程在写完临时快照后未能替换目标，或在替换窗口退出                                | 先退出全部 Codex/Relay 进程，再把孤儿文件移动到备份目录                                             |
 
 Windows 状态持久层避坑：
 
@@ -417,6 +419,15 @@ Windows 状态持久层避坑：
 - 不要手动删除仍在使用的 `relay-state.json.lock`。持锁 PID 已退出时，新版会安全回收陈旧锁；PID 仍存活时会保守超时，避免误删活锁。
 - 不要用“先删除 `relay-state.json` 再重命名”或直接覆盖写来规避 Windows 锁；前者制造文件缺失窗口，后者可能在崩溃时留下半截 JSON。
 - 排障时只检查状态文件大小、时间、PID 和错误码即可，不要把状态正文或 Cursor 凭据粘贴进提示词和日志。
+
+MCP App `Transport closed` 避坑：
+
+- 这条错误说明 Codex 到该任务专属 MCP 子进程的 stdio 通道已经关闭；它不是 Cursor 模型的审查结论，也不能据此判断仓库或运行状态损坏。
+- 先在新任务依次调用 `doctor`、`list_models`，再读取 `ui://cursor-relay/run-panel-v1.html`。三项均成功时，插件安装、认证和面板资源正常，故障范围只在旧任务连接。
+- 插件升级、cachebuster 重装、Codex 后端刷新或任务休眠都可能结束旧子进程。旧任务不会热加载新插件；恢复顺序是“重新进入任务触发刷新 → 新建任务复验 → 必要时完全退出并重开 Codex”，不要在旧 transport 上无限重试。
+- Relay 会在接受 MCP 请求前调用 Cursor SDK 公共 `CursorAgentPlatform.prewarmLocalWorkspace()`，加载首次 `agent.send` 需要的本地执行器分块，随即释放预热执行器；云目录分支则使用本地必失败的无网络探针预载，探针以不合法 HTTP 头在网络发送前立即终止，不读取、不替换也不输出真实凭据。这样可避免 Codex 清理旧插件缓存后，仍存活的进程在 `list_models` 或首次 `agent.send` 时找不到 `dist/esm/<chunk>.js`。如果旧版明确报缺少数字分块（例如 `642.js`、`877.js`），说明任务仍绑定升级前进程，必须安装含本修复的新版本并新建任务，不能在原任务继续验收。
+- 若 `start_run` 已经返回 `relayRunId`，不要因面板加载失败重复提交。连接恢复后使用原 `relayRunId` 调用 `get_run` / `wait_run`，以持久状态为准；只有服务器明确返回未创建运行时才能使用原 `idempotencyKey` 安全重试。
+- 若新任务也失败，再查 Codex 日志中该任务的 `mcp_server_startup_status_updated`。曾出现 `ready` 后才变为 `Transport closed` 与从未达到 `ready` 是两类问题，前者查生命周期/重载，后者查启动命令、Node.js、构建和缓存。
 
 ## 三分钟验收清单
 
