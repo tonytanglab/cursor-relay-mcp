@@ -20,7 +20,7 @@
       "Conversation-scoped read/write workspace approval"
     ],
     "defaultPrompt": [
-      "Pass only workspace, locations, and scope; never source text. Let Cursor read authorized files, keep 24h runs, and verify changes."
+      "Pass workspace, locations and scope, never source text. Cursor reads authorized files. Keep 24h runs and share open_run links."
     ]
   },
   "mcpServers": "./.mcp.json",

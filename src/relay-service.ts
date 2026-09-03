@@ -80,13 +80,13 @@ export class RelayService {
       maxTimeoutMs: this.config.maxTimeoutMs,
       capabilities: {
         liveRunPanel: true,
+        localProgressLinks: true,
         workspaceReadsSourceDirectly: true,
         embeddedSourceArgumentsRejected: true,
         cursorManagedNetworkAccess: true,
         transientReconnectKeepsRunAlive: true,
         activeRunSteering: false,
-        activeRunSteeringReason:
-          "@cursor/sdk 1.0.28 的公开 Run API 仅支持 stream、wait、cancel 与 conversation；Relay 不会把内部事件追加伪装成已向运行中的 Agent 送达纠偏指令",
+        activeRunSteeringReason: `@cursor/sdk ${CURSOR_SDK_VERSION} 的公开 Run API 仅支持 stream、wait、cancel 与 conversation；Relay 不会把内部事件追加伪装成已向运行中的 Agent 送达纠偏指令`,
       },
       warning:
         authentication.mode === "missing"
@@ -340,6 +340,21 @@ export class RelayService {
 
   async getRunSnapshot(relayRunId: string): Promise<RelayRunSummary> {
     return summarize(await this.requireRun(relayRunId));
+  }
+
+  async getRunProgressSnapshot(relayRunId: string, afterSequence = 0) {
+    // A viewer must never attach, launch, cancel or settle an expired run.
+    const run = await this.requireRun(relayRunId);
+    const events = run.events
+      .filter((event) => event.sequence > afterSequence)
+      .slice(-200);
+    return {
+      run: summarize(run),
+      events,
+      nextSequence: events.at(-1)?.sequence ?? afterSequence,
+      snapshotOnly: true,
+      readAt: new Date().toISOString(),
+    };
   }
 
   async listRuns(limit = 50): Promise<{ runs: RelayRunSummary[] }> {

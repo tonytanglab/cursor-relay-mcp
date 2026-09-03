@@ -85,12 +85,18 @@ explicit budget when appropriate, but cannot raise a run above 24 hours. A
 While status and events show healthy progress, callers should keep waiting within
 the run budget instead of cancelling or creating short continuation runs.
 
-`start_run` and `reply_run` attach an MCP Apps read-only panel that shows the
-current status, selected model and permission, elapsed time, incremental Cursor
-SDK event timeline, token usage, error, and final output. `view_run` opens the
-same panel for an existing Relay run. The panel calls only `wait_run` and
-`read_events`; it cannot authorize, start, reply to, or cancel a run. Hosts that
-do not render MCP Apps keep the existing structured tool-result fallback.
+After `start_run` or `reply_run`, call `open_run` and share its clickable
+`progressUrl`. This read-only loopback page bypasses MCP App sandbox failures.
+Links are bound to one run, expire after 24 hours, and stop working when their
+MCP process exits; call `open_run` again with the original run ID, never resubmit
+the task to fix a display error. Do not share these capability links externally.
+`view_run` remains an optional embedded panel. Data tools no longer attach a
+widget, avoiding redundant sandbox frames. Both viewers use `read_run_progress`
+for persisted snapshots and the latest 200 incremental events; viewing never
+attaches to the SDK, settles a timeout, or mutates a run. A persisted `running`
+status is not proof of liveness: callers must still monitor with `wait_run`.
+The panel retries read failures, shows recovery errors, and releases timers
+and old events. No network fonts, scripts, or external services are used.
 
 The pinned public Cursor SDK has no operation for injecting a new instruction
 into an active local Agent run. The relay therefore reports

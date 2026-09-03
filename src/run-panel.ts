@@ -351,6 +351,12 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
       [hidden] {
         display: none !important;
       }
+
+      button { cursor: pointer; min-height: 40px; padding: 8px 14px; margin-top: 10px; }
+      button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+      .stream-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+      .event-text { display: block; }
+      @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
     </style>
   </head>
   <body>
@@ -389,6 +395,7 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
 
       <section class="card">
         <h2>工作流程</h2>
+        <p class="empty">只读持久快照，不代表 SDK 当前连接状态；最近活动长时间不变时，请用 wait_run 核实。面板仅保留最近 200 条事件。</p>
         <ol id="timeline" class="timeline">
           <li class="empty">尚无 Cursor SDK 事件。</li>
         </ol>
@@ -399,14 +406,18 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
         <pre id="output" class="output"></pre>
       </section>
 
-      <section id="errorCard" class="card" hidden>
+      <section id="errorCard" class="card" role="alert" hidden>
         <h2>状态读取错误</h2>
         <pre id="error" class="error"></pre>
+        <p class="empty">读取失败不会取消任务。若沙箱无法加载，请调用 open_run 获取本机进度链接；不要重复启动任务。</p>
+        <button id="retry" type="button">重新连接</button>
       </section>
     </main>
 
     <script>
       (() => {
+        /* LOCAL_PROGRESS_MODE */
+        const localProgress = window.cursorRelayLocalProgress === true;
         const projectRunPanelEvents = ${projectRunPanelEvents.toString()};
         const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
         const STATUS_LABELS = {
@@ -417,8 +428,12 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           cancelled: "已取消",
         };
         const pending = new Map();
+        const legacyPending = new Set();
         let nextRequestId = 1;
-        let postMessageReady = Promise.resolve(false);
+        let postMessageReady = null;
+        let renderTimer;
+        let pauseTimer;
+        let resumePause;
         const state = {
           run: null,
           events: new Map(),
@@ -427,13 +442,31 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           destroyed: false,
           lastError: "",
           reconnecting: false,
+          timelineDirty: true,
         };
 
         const byId = (id) => document.getElementById(id);
         const text = (id, value) => {
           byId(id).textContent = value == null || value === "" ? "—" : String(value);
         };
-        const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const pause = (ms) => new Promise((resolve) => {
+          resumePause = resolve;
+          pauseTimer = setTimeout(resolve, ms);
+        });
+
+        function reportError(error) {
+          if (state.destroyed) return;
+          state.lastError = error instanceof Error ? error.message : String(error);
+          render();
+        }
+
+        function ensureBridge() {
+          if (!postMessageReady) postMessageReady = connectMcpApp().catch((error) => {
+            postMessageReady = null;
+            throw error;
+          });
+          return postMessageReady;
+        }
 
         function request(method, params, timeoutMs = 35_000) {
           const id = nextRequestId++;
@@ -482,12 +515,35 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
         }
 
         async function callTool(name, args) {
-          if (window.openai && typeof window.openai.callTool === "function") {
-            return await window.openai.callTool(name, args);
+          if (localProgress) {
+            const response = await fetch("./snapshot?afterSequence=" + args.afterSequence, {
+              cache: "no-store", signal: AbortSignal.timeout(10_000),
+            });
+            if (!response.ok) throw new Error(await response.text());
+            return await response.json();
           }
-          const ready = await postMessageReady;
-          if (!ready) throw new Error("MCP Apps 桥接尚未初始化");
-          return await request("tools/call", { name, arguments: args });
+          try {
+            const ready = await ensureBridge();
+            if (ready) return await request("tools/call", { name, arguments: args });
+            if (window.openai && typeof window.openai.callTool === "function") {
+              let timer;
+              let cancel;
+              try {
+                return await Promise.race([
+                  window.openai.callTool(name, args),
+                  new Promise((_, reject) => {
+                    cancel = () => reject(new Error("运行面板已关闭"));
+                    legacyPending.add(cancel);
+                    timer = setTimeout(() => reject(new Error("MCP 兼容桥接请求超时")), 35_000);
+                  }),
+                ]);
+              } finally { clearTimeout(timer); legacyPending.delete(cancel); }
+            }
+            throw new Error("MCP Apps 桥接尚未初始化");
+          } catch (error) {
+            postMessageReady = null;
+            throw error;
+          }
         }
 
         function unwrap(result) {
@@ -512,6 +568,9 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           if (Number.isInteger(data.nextSequence)) {
             state.nextSequence = Math.max(state.nextSequence, data.nextSequence);
           }
+          const sequences = Array.from(state.events.keys()).sort((a, b) => a - b);
+          for (const sequence of sequences.slice(0, -200)) state.events.delete(sequence);
+          if (data.events.length) state.timelineDirty = true;
         }
 
         function acceptConnection(data) {
@@ -527,13 +586,17 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
         }
 
         function accept(result) {
+          if (state.destroyed) return;
           const data = unwrap(result);
           if (!data || typeof data !== "object") return;
-          if (data.run && typeof data.run === "object") state.run = data.run;
+          if (data.run && typeof data.run === "object") {
+            if (state.run && state.run.relayRunId !== data.run.relayRunId) return;
+            state.run = data.run;
+          }
           mergeEvents(data);
           acceptConnection((data.run && data.run.connection) ? data.run : data);
           render();
-          if (state.run && !state.pumping && !TERMINAL.has(state.run.status)) {
+          if (state.run && !state.pumping) {
             void pump();
           }
         }
@@ -572,7 +635,7 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           if (!run || !run.deadlineAt || TERMINAL.has(run.status)) return "—";
           const remaining = Date.parse(run.deadlineAt) - Date.now();
           if (!Number.isFinite(remaining)) return "—";
-          if (remaining <= 0) return "正在收敛超时状态";
+          if (remaining <= 0) return "预算已到；快照尚未确认终态";
           const seconds = Math.floor(remaining / 1000);
           const hours = Math.floor(seconds / 3600);
           const minutes = Math.floor((seconds % 3600) / 60);
@@ -598,6 +661,8 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
         }
 
         function renderTimeline() {
+          if (!state.timelineDirty) return;
+          state.timelineDirty = false;
           const timeline = byId("timeline");
           const events = Array.from(state.events.values())
             .sort((left, right) => left.sequence - right.sequence)
@@ -674,10 +739,12 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           byId("pulse").dataset.active = String(active);
           text(
             "liveText",
-            state.reconnecting
+            state.lastError
+              ? "进度读取暂时失败；任务未被取消"
+              : state.reconnecting
               ? "Cursor SDK 暂时不可达，正在自动重连"
               : active
-                ? "正在读取 Relay 实时状态"
+                ? "正在刷新只读进度快照"
                 : run
                   ? "实时读取已停止"
                   : "等待运行数据",
@@ -685,6 +752,9 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           const status = byId("status");
           status.dataset.status = run ? run.status : "unknown";
           status.textContent = run ? STATUS_LABELS[run.status] || run.status : "未知";
+          const errorMessage = state.lastError || (run && run.error && run.error.message) || "";
+          byId("errorCard").hidden = !errorMessage;
+          text("error", errorMessage);
           if (!run) return;
 
           text("task", run.task);
@@ -706,59 +776,49 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           const outputCard = byId("outputCard");
           outputCard.hidden = !run.assistantText;
           text("output", run.assistantText || "");
-          const errorMessage = state.lastError || (run.error && run.error.message) || "";
-          byId("errorCard").hidden = !errorMessage;
-          text("error", errorMessage);
-        }
-
-        async function readNewEvents() {
-          if (!state.run) return;
-          let received;
-          do {
-            const result = await callTool("read_events", {
-              relayRunId: state.run.relayRunId,
-              afterSequence: state.nextSequence,
-              limit: 500,
-            });
-            const data = unwrap(result);
-            received = data && Array.isArray(data.events) ? data.events.length : 0;
-            mergeEvents(data);
-            acceptConnection(data);
-            render();
-          } while (received === 500 && !state.destroyed);
         }
 
         async function pump() {
-          if (state.pumping || !state.run) return;
+          if (state.pumping || state.destroyed || (!state.run && !localProgress)) return;
           state.pumping = true;
           try {
-            await readNewEvents();
-            while (state.run && !TERMINAL.has(state.run.status) && !state.destroyed) {
+            while (!state.destroyed) {
               try {
-                const result = await callTool("wait_run", {
-                  relayRunId: state.run.relayRunId,
-                  waitMs: 20_000,
+                const result = await callTool("read_run_progress", {
+                  relayRunId: state.run && state.run.relayRunId,
+                  afterSequence: state.nextSequence,
                 });
+                if (state.destroyed) break;
                 accept(result);
-                await readNewEvents();
+                if (state.run && TERMINAL.has(state.run.status)) break;
               } catch (error) {
-                state.lastError = error instanceof Error ? error.message : String(error);
-                render();
-                await pause(2_000);
+                if (state.destroyed) break;
+                reportError(error);
               }
+              await pause(2_000);
             }
-            if (state.run && TERMINAL.has(state.run.status)) await readNewEvents();
           } finally {
             state.pumping = false;
-            render();
+            if (!state.destroyed) render();
           }
+        }
+
+        function teardown() {
+          state.destroyed = true;
+          clearInterval(renderTimer);
+          clearTimeout(pauseTimer);
+          if (resumePause) resumePause();
+          for (const item of pending.values()) item.reject(new Error("运行面板已关闭"));
+          pending.clear();
+          for (const cancel of legacyPending) cancel();
+          legacyPending.clear();
         }
 
         window.addEventListener("message", (event) => {
           if (event.source !== window.parent) return;
           const message = event.data;
           if (!message || message.jsonrpc !== "2.0") return;
-          if (message.id !== undefined && pending.has(message.id)) {
+          if (!message.method && message.id !== undefined && pending.has(message.id)) {
             const item = pending.get(message.id);
             pending.delete(message.id);
             if (message.error) item.reject(new Error(message.error.message || "MCP Apps 请求失败"));
@@ -774,8 +834,8 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
             }
             return;
           }
-          if (message.method === "ui/resource-teardown") {
-            state.destroyed = true;
+          if (message.method === "ui/resource-teardown" || message.method === "ping") {
+            if (message.method === "ui/resource-teardown") teardown();
             if (message.id !== undefined) {
               window.parent.postMessage(
                 { jsonrpc: "2.0", id: message.id, result: {} },
@@ -786,10 +846,17 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
         }, { passive: true });
 
         window.addEventListener("pagehide", () => {
-          state.destroyed = true;
-          for (const item of pending.values()) item.reject(new Error("运行面板已关闭"));
-          pending.clear();
+          teardown();
         }, { once: true });
+
+        byId("retry").addEventListener("click", () => {
+          postMessageReady = null;
+          if (resumePause) { clearTimeout(pauseTimer); resumePause(); }
+          if (localProgress || state.run) void pump();
+          else void ensureBridge().catch(reportError);
+        });
+
+        if (!localProgress) void ensureBridge().catch(reportError);
 
         if (window.openai && window.openai.toolOutput) {
           try {
@@ -800,12 +867,8 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           }
         }
         render();
-        postMessageReady = connectMcpApp().catch((error) => {
-          state.lastError = error instanceof Error ? error.message : String(error);
-          render();
-          return false;
-        });
-        window.setInterval(() => {
+        if (localProgress) void pump();
+        renderTimer = window.setInterval(() => {
           if (state.run && !TERMINAL.has(state.run.status)) render();
         }, 1_000);
       })();

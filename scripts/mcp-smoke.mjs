@@ -15,8 +15,10 @@ const client = new Client({ name: "cursor-relay-smoke", version: "0.1.1" });
 try {
   await client.connect(transport);
   const tools = await client.listTools();
-  if (!tools.tools.some((tool) => tool.name === "wait_run"))
-    throw new Error("wait_run missing");
+  for (const name of ["wait_run", "open_run", "read_run_progress"]) {
+    if (!tools.tools.some((tool) => tool.name === name))
+      throw new Error(`${name} missing`);
+  }
   const doctorTool = tools.tools.find((tool) => tool.name === "doctor");
   const reauthenticateTool = tools.tools.find(
     (tool) => tool.name === "reauthenticate_cursor",
@@ -37,8 +39,7 @@ try {
     startTool?.annotations?.destructiveHint !== true ||
     startTool.annotations.idempotentHint !== true ||
     viewTool?.annotations?.readOnlyHint !== true ||
-    startTool._meta?.ui?.resourceUri !==
-      "ui://cursor-relay/run-panel-v1.html" ||
+    startTool._meta?.ui?.resourceUri !== undefined ||
     viewTool._meta?.ui?.resourceUri !== "ui://cursor-relay/run-panel-v1.html" ||
     waitTool?._meta?.["openai/widgetAccessible"] !== true ||
     eventsTool?._meta?.["openai/widgetAccessible"] !== true
@@ -66,8 +67,7 @@ try {
     !panelText.includes("Cursor Relay 运行") ||
     !panelText.includes('request("ui/initialize"') ||
     !panelText.includes('notify("ui/notifications/initialized"') ||
-    !panelText.includes('callTool("wait_run"') ||
-    !panelText.includes('callTool("read_events"')
+    !panelText.includes('callTool("read_run_progress"')
   )
     throw new Error("run panel payload invalid");
   const result = await client.callTool({ name: "doctor", arguments: {} });

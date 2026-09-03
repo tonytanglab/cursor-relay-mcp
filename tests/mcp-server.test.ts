@@ -111,6 +111,15 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
       calls.push(relayRunId);
       return run;
     },
+    getRunProgressSnapshot: async (relayRunId: string, afterSequence = 0) => {
+      calls.push(relayRunId);
+      return {
+        run,
+        events: [],
+        nextSequence: afterSequence,
+        snapshotOnly: true,
+      };
+    },
   } as unknown as RelayService;
   const server = createMcpServer(service);
   const client = new Client({ name: "panel-test", version: "0.1.1" });
@@ -136,7 +145,7 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
     assert.match("text" in content ? content.text : "", /Cursor Relay 运行/);
 
     const tools = await client.listTools();
-    for (const name of ["start_run", "reply_run", "view_run"]) {
+    for (const name of ["view_run"]) {
       const tool = tools.tools.find((item) => item.name === name);
       const ui = tool?._meta?.ui as { resourceUri?: unknown } | undefined;
       assert.equal(ui?.resourceUri, RUN_PANEL_URI);
@@ -144,6 +153,11 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
     }
     for (const name of ["start_run", "reply_run"]) {
       const tool = tools.tools.find((item) => item.name === name);
+      assert.equal(
+        tool?._meta?.ui,
+        undefined,
+        "data tools must not create sandbox frames",
+      );
       const properties = (tool?.inputSchema.properties ?? {}) as Record<
         string,
         { description?: unknown }
@@ -160,7 +174,12 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
       );
       assert.equal("sourceContent" in properties, false);
     }
-    for (const name of ["get_run", "wait_run", "read_events"]) {
+    for (const name of [
+      "get_run",
+      "wait_run",
+      "read_events",
+      "read_run_progress",
+    ]) {
       const tool = tools.tools.find((item) => item.name === name);
       const ui = tool?._meta?.ui as { visibility?: unknown } | undefined;
       assert.deepEqual(ui?.visibility, ["model", "app"]);
@@ -181,6 +200,25 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
       data: { run },
     });
     assert.deepEqual(calls, [run.relayRunId]);
+    const progress = await client.callTool({
+      name: "read_run_progress",
+      arguments: { relayRunId: run.relayRunId, afterSequence: 42 },
+    });
+    assert.deepEqual(progress.structuredContent, {
+      ok: true,
+      data: { run, events: [], nextSequence: 42, snapshotOnly: true },
+    });
+    const opened = await client.callTool({
+      name: "open_run",
+      arguments: { relayRunId: run.relayRunId },
+    });
+    const link = (opened.structuredContent as { data: { progressUrl: string } })
+      .data.progressUrl;
+    assert.equal((await fetch(link)).status, 200);
+    assert.equal(
+      tools.tools.find((item) => item.name === "open_run")?._meta,
+      undefined,
+    );
   } finally {
     await client.close();
     await server.close();
@@ -188,8 +226,7 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
 });
 
 test("run panel polls actual Relay data without mutating a run", () => {
-  assert.equal(RUN_PANEL_HTML.includes('callTool("wait_run"'), true);
-  assert.equal(RUN_PANEL_HTML.includes('callTool("read_events"'), true);
+  assert.equal(RUN_PANEL_HTML.includes('callTool("read_run_progress"'), true);
   assert.equal(RUN_PANEL_HTML.includes('request("tools/call"'), true);
   assert.equal(RUN_PANEL_HTML.includes('request("ui/initialize"'), true);
   assert.equal(
@@ -211,6 +248,9 @@ test("run panel polls actual Relay data without mutating a run", () => {
     "reply_run",
     "cancel_run",
     "authorize_workspace",
+    "wait_run",
+    "read_events",
+    "get_run",
   ]) {
     assert.equal(
       RUN_PANEL_HTML.includes(`callTool("${mutatingTool}"`),

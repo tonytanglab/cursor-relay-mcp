@@ -10,7 +10,7 @@
 - 幂等 `start_run` / `reply_run`，相同键和相同请求返回原运行；不同请求返回结构化冲突。
 - Relay 状态采用原子 UTF-8 JSON，Cursor SDK 状态采用官方 `JsonlLocalAgentStore`；进程重启后可通过 `Agent.getRun` 重连。
 - `wait_run` 每次最多等待 30 秒，未结束时明确返回 `mustCallAgain=true`。
-- `start_run` / `reply_run` 自动附带只读实时面板；也可用 `view_run` 打开既有运行，查看状态、事件时间线和最终输出。
+- `open_run` 提供不依赖 MCP 沙箱的本机只读进度链接；`view_run` 保留可选内嵌面板，查看状态、增量文本与最终输出。
 - 总运行超时、取消、有限事件缓冲、8 KiB 单事件上限、敏感字段名脱敏以及统一结构化错误。
 - 安全默认值：无人值守运行必须命中静态工作区白名单；当前对话明确授权时可为精确工作区签发对话级、可复用的只读或读写 capability；默认只读并只加载项目设置；支持的非 Windows 主机默认启用 Cursor 沙箱，Windows 因当前 SDK 本地运行时不支持而关闭沙箱，但仍强制权限预设和工具限制。
 - SDK Agent 句柄在运行终态后释放；模型、requestId、耗时和 token usage 使用官方公开结果字段持久化。
@@ -109,7 +109,7 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 
 `cwd: "."` 由 Codex 解析为已安装插件的版本缓存根目录，因此这里不能写开发机的绝对仓库路径，也不能写 `%USERPROFILE%\.codex\plugins\cache\...` 这种会随版本变化的缓存路径。不要再给 Codex 手工添加第二份同名 MCP 配置，否则可能同时启动两个 Relay 进程并读写同一状态目录。不要把 `CURSOR_API_KEY` 写进 `.mcp.json`；内置 MCP 使用启动 Codex 的同一操作系统用户的 Cursor stored login。
 
-安装或重装后必须新建 Codex 任务。Codex 会从 manifest 加载 Skill，并从 `.mcp.json` 启动 MCP；界面里的工具名可能带规范化前缀，逻辑工具包括 `doctor`、`list_models`、`reauthenticate_cursor`、`authorize_workspace`、`start_run`、`reply_run`、`view_run` 和 `wait_run`。`start_run` / `reply_run` 会附带进度卡片，也可随时调用 `view_run` 重开。正确链路是：
+安装或重装后必须新建 Codex 任务。Codex 会从 manifest 加载 Skill，并从 `.mcp.json` 启动 MCP；界面里的工具名可能带规范化前缀，逻辑工具包括 `doctor`、`list_models`、`reauthenticate_cursor`、`authorize_workspace`、`start_run`、`reply_run`、`open_run`、`read_run_progress`、`view_run` 和 `wait_run`。启动/续接后调用 `open_run` 并向用户展示可点击的进度链接；`view_run` 是可选内嵌入口。正确链路是：
 
 本插件的 Codex Skill 已作为原始包内容内置在 `skills/delegate-to-cursor-agent/SKILL.md`。manifest 通过 `"skills": "./skills/"` 声明它，`package.json` 也把整个 `skills/` 纳入发布文件。因此安装或重装插件后，Codex 会在新建任务中自动加载该 Skill，不需要、也不应在安装时动态生成另一份副本。
 
@@ -136,6 +136,8 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 | `reply_run`             | 仅用目标位置与任务范围续接已结束的 Agent 会话           |
 | `get_run`               | 读取状态并在重启后重连                                  |
 | `view_run`              | 打开只读实时面板查看既有运行                            |
+| `open_run`              | 获取指定任务的本机只读进度链接，不依赖 MCP 沙箱         |
+| `read_run_progress`     | 只读持久状态与最多 200 条近期增量事件，不调用 SDK       |
 | `wait_run`              | 最多等待 30 秒，直到 `terminal=true`                    |
 | `cancel_run`            | 取消运行                                                |
 | `list_runs`             | 查看持久运行                                            |
@@ -145,7 +147,7 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 
 ### 实时面板与运行中纠偏边界
 
-`start_run` 与 `reply_run` 返回结果会绑定同一个 MCP Apps 只读面板；`view_run` 可按 `relayRunId` 再次打开。面板只调用 `wait_run` 和 `read_events`，展示真实 Relay 状态、模型、权限、耗时、Cursor SDK 增量事件、token 使用量、错误和最终输出，不会授权、启动、续接或取消运行。不支持 MCP Apps 的宿主仍可使用原有结构化工具结果。
+`start_run` 与 `reply_run` 不再自动创建沙箱面板。启动成功后调用 `open_run`，向用户展示返回的 `progressUrl`，即可随时点击查看；链接只绑定一个任务，仅监听 `127.0.0.1`，拒绝跨站读取与写操作。链接不要外传，最长有效 24 小时，且随所属 MCP 进程结束失效；失效后使用原 `relayRunId` 重开，禁止为了修复显示重复提交任务。`view_run` 保留可选内嵌入口。两个页面均只读持久快照，不重连 SDK、不收敛超时、不授权或修改运行；显示“运行中”不等于 SDK 仍在线，主任务仍须调用 `wait_run` 核实。面板自动重试读取错误，保留最近 200 条事件并连续显示文本，关闭时释放计时器。
 
 `doctor` 会返回实际生效的 `defaultTimeoutMs` 与 `maxTimeoutMs`。普通仓库任务必须省略 `timeoutMs`，使用默认 24 小时总预算；只有用户或任务确实要求更短预算时才显式传入，任何运行都不能超过 24 小时硬上限。单次 `wait_run` 超时只是轮询切片；可重试的 SDK 重连异常会返回 `connection.state=reconnecting` 并保持运行非终态。只要运行状态与事件持续正常推进，就应在总预算内继续等待，不应因已等待 10 分钟、2 小时或 4 小时而取消或拆成多个短续接运行；真正达到 24 小时总预算才是执行超时，不代表任务推理在语义上失败。
 

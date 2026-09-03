@@ -3,6 +3,7 @@ import * as z from "zod/v4";
 import { CURSOR_RELAY_HARD_MAX_TIMEOUT_MS } from "./config.js";
 import { asRelayError } from "./errors.js";
 import type { RelayService } from "./relay-service.js";
+import { RunProgressServer } from "./run-progress-server.js";
 import {
   TARGET_LOCATION_MAX_CHARS,
   TARGET_LOCATIONS_MAX_ITEMS,
@@ -73,6 +74,10 @@ const targetLocationsSchema = z
 
 export function createMcpServer(service: RelayService): McpServer {
   const server = new McpServer({ name: "cursor-relay-mcp", version: "0.1.1" });
+  const progress = new RunProgressServer(service);
+  server.server.onclose = () => {
+    void progress.close();
+  };
 
   server.registerResource(
     "cursor-relay-run-panel",
@@ -174,7 +179,6 @@ export function createMcpServer(service: RelayService): McpServer {
         timeoutMs: timeoutSchema,
       },
       annotations: mutatingAnnotations(true),
-      _meta: runPanelMeta("正在启动 Cursor…", "Cursor 运行已启动"),
     },
     guarded(async (input, extra) =>
       service.startRun(input, callerScope(extra)),
@@ -205,7 +209,6 @@ export function createMcpServer(service: RelayService): McpServer {
         timeoutMs: timeoutSchema,
       },
       annotations: mutatingAnnotations(true),
-      _meta: runPanelMeta("正在续接 Cursor…", "Cursor 后续运行已启动"),
     },
     guarded(async (input, extra) =>
       service.replyRun(input, callerScope(extra)),
@@ -224,6 +227,39 @@ export function createMcpServer(service: RelayService): McpServer {
     guarded(async ({ relayRunId }) => ({
       run: await service.getRun(relayRunId),
     })),
+  );
+
+  server.registerTool(
+    "open_run",
+    {
+      description:
+        "获取现有任务的本机只读进度链接，向用户展示可点击链接；不依赖 Codex MCP 沙箱。start_run/reply_run 成功后调用；沙箱报错时也用它查看原任务，禁止因此重复提交。",
+      inputSchema: { relayRunId: z.string().min(1) },
+      annotations: readOnlyAnnotations(false),
+    },
+    guarded(async ({ relayRunId }) => progress.open(relayRunId)),
+  );
+
+  server.registerTool(
+    "read_run_progress",
+    {
+      description:
+        "只读指定任务的持久状态与最近最多 200 条增量事件；不调用 SDK、不重连、不收敛超时。快照不是任务存活证明，实际监控仍用 wait_run。",
+      inputSchema: {
+        relayRunId: z.string().min(1),
+        afterSequence: z
+          .number()
+          .int()
+          .min(0)
+          .max(Number.MAX_SAFE_INTEGER)
+          .optional(),
+      },
+      annotations: readOnlyAnnotations(false),
+      _meta: appCallableMeta(),
+    },
+    guarded(async ({ relayRunId, afterSequence }) =>
+      service.getRunProgressSnapshot(relayRunId, afterSequence),
+    ),
   );
 
   server.registerTool(

@@ -33,6 +33,10 @@ const manifest = JSON.parse(
   await readFile(resolve(".codex-plugin/plugin.json"), "utf8"),
 );
 const cachebusterPrefix = `${packageJson.version}+codex.`;
+for (const prompt of manifest.interface?.defaultPrompt ?? []) {
+  if (typeof prompt !== "string" || prompt.length > 128)
+    throw new Error("插件 defaultPrompt 必须是至多 128 字符的字符串");
+}
 const cachebuster = manifest.version.startsWith(cachebusterPrefix)
   ? manifest.version.slice(cachebusterPrefix.length)
   : "";

@@ -310,7 +310,13 @@ Local SDK sandboxing was requested, but sandboxing is not supported in this envi
 
 ## 九、新任务中完成 Grok 4.6 冒烟测试
 
-插件安装或重装后必须新建 Codex 任务。旧任务不会动态获得新插件的 skills、MCP 工具或实时运行面板。新任务中的 `doctor` 应显示 `defaultTimeoutMs=86400000` 与 `maxTimeoutMs=86400000`；普通 `start_run` / `reply_run` 省略 `timeoutMs` 即使用 24 小时总预算，任何显式值也不能超过 24 小时。运行会附带只读进度卡片，也可按 `relayRunId` 调用 `view_run` 随时重开；可重试的 SDK 短暂断连会以 `connection.state=reconnecting` 保持非终态并继续轮询。
+插件安装或重装后必须新建 Codex 任务。旧任务不会动态获得新插件的 skills、MCP 工具或实时运行面板。新任务中的 `doctor` 应显示 `defaultTimeoutMs=86400000` 与 `maxTimeoutMs=86400000`；普通 `start_run` / `reply_run` 省略 `timeoutMs` 即使用 24 小时总预算，任何显式值也不能超过 24 小时。启动成功后调用 `open_run` 并展示可点击的本机进度链接；`view_run` 保留可选内嵌面板。可重试的 SDK 短暂断连会以 `connection.state=reconnecting` 保持非终态并继续轮询。
+
+### MCP 沙箱加载失败，但 Relay 仍可调用
+
+若 Codex 显示 `The MCP app sandbox failed to load`，先用 `doctor` / `list_runs` 区分显示故障与 MCP 进程不可达。宿主日志若为 `mcp_app_sandbox.init_failed`、`stage=handshake`、`MCP sandbox RPC timed out`，且没有进入 `widget_execution_requested`，说明失败在插件页面运行之前；这不是 Cursor 任务失败证据。可直接用原 `relayRunId` 调用 `open_run` 绕开沙箱，不需要重发任务。
+
+本机页面只读取持久快照，最近活动时间可用于判断数据是否停滞，但“运行中”不能证明 SDK 当前存活；继续以 `wait_run` 获取恢复/终态信息。若进度链接因 MCP 进程退出而失效，在可用的新任务中调用 `open_run` 重建链接。链接只允许本机访问，最长 24 小时有效，不应外传。插件端的这些措施绕开显示层故障，并不能修复 Codex 宿主内部的沙箱握手实现。
 
 在新任务中输入：
 

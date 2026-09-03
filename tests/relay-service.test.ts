@@ -223,6 +223,54 @@ async function fixture() {
   };
 }
 
+test("progress snapshots are bounded and never touch SDK or mutate expired state", async () => {
+  const item = await fixture();
+  try {
+    await item.store.update((state) => {
+      state.runs["snapshot-only"] = {
+        relayRunId: "snapshot-only",
+        agentId: "agent-snapshot",
+        workspace: item.dir,
+        task: "中文状态",
+        model: { id: "cursor-test" },
+        permission: "read-only",
+        status: "running",
+        createdAt: "2020-01-01T00:00:00.000Z",
+        updatedAt: "2020-01-01T00:00:00.000Z",
+        deadlineAt: "2020-01-02T00:00:00.000Z",
+        events: Array.from({ length: 300 }, (_, i) => ({
+          sequence: i + 1,
+          timestamp: "2020-01-01T00:00:00.000Z",
+          type: "status",
+          data: {},
+        })),
+      };
+    });
+    const before = await item.store.read();
+    const sdk = new Proxy({} as CursorSdkPort, {
+      get() {
+        throw new Error("snapshot must not access SDK");
+      },
+    });
+    const service = new RelayService(item.config, item.store, sdk);
+    const first = await service.getRunProgressSnapshot("snapshot-only");
+    assert.equal(first.run.status, "running");
+    assert.equal(first.events.length, 200);
+    assert.equal(first.events[0]?.sequence, 101);
+    assert.equal(first.nextSequence, 300);
+    assert.equal(first.snapshotOnly, true);
+    const delta = await service.getRunProgressSnapshot("snapshot-only", 295);
+    assert.equal(delta.events.length, 5);
+    assert.equal(delta.nextSequence, 300);
+    const empty = await service.getRunProgressSnapshot("snapshot-only", 300);
+    assert.equal(empty.events.length, 0);
+    assert.equal(empty.nextSequence, 300);
+    assert.deepEqual(await item.store.read(), before);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
 test("model validation, permission mapping, idempotency and wait contract", async () => {
   const item = await fixture();
   try {
