@@ -191,6 +191,72 @@ test("first read failure retries and terminal runs fetch their events before sto
   }
 });
 
+for (const local of [false, true]) {
+  test(`${local ? "local" : "MCP"} viewer reads unknown execution once and stops automatic polling`, async () => {
+    const unknownRun = {
+      ...run,
+      execution: { state: "unknown", message: "执行器已丢失，请核实历史运行" },
+    };
+    const app = harness({
+      local,
+      initial: local ? undefined : { run: unknownRun },
+      tool: () => ({
+        run: unknownRun,
+        events: [{ sequence: 1, type: "thinking", data: { text: "历史正文" } }],
+      }),
+    });
+    try {
+      await flush();
+      assert.equal(app.calls, 1);
+      assert.equal(app.get("status").textContent, "执行状态待核实");
+      assert.equal(app.get("pulse").dataset.active, "false");
+      assert.equal(app.get("liveText").textContent, "实时读取已停止");
+      assert.equal(app.get("errorCard").hidden, false);
+      assert.match(app.get("error").textContent, /执行器已丢失/u);
+      assert.equal(
+        app.get("timeline").querySelector(".stream-text")?.textContent,
+        "历史正文",
+      );
+      await app.fire(2_000);
+      await app.fire(1_000);
+      assert.equal(app.calls, 1);
+      app.get("retry").listeners.get("click")?.();
+      await flush();
+      assert.equal(
+        app.calls,
+        2,
+        "explicit retry still reads the persisted snapshot",
+      );
+      await app.fire(2_000);
+      assert.equal(app.calls, 2);
+    } finally {
+      app.close();
+    }
+  });
+}
+
+test("running viewer stops when a later snapshot loses its executor", async () => {
+  const app = harness({
+    initial: { run },
+    tool: (call) => ({
+      run: call === 1 ? run : { ...run, execution: { state: "unknown" } },
+      events: [],
+    }),
+  });
+  try {
+    await flush();
+    assert.equal(app.get("pulse").dataset.active, "true");
+    await app.fire(2_000);
+    assert.equal(app.calls, 2);
+    assert.equal(app.get("status").textContent, "执行状态待核实");
+    assert.equal(app.get("pulse").dataset.active, "false");
+    await app.fire(2_000);
+    assert.equal(app.calls, 2);
+  } finally {
+    app.close();
+  }
+});
+
 test("handshake error is visible before run data and retry reinitializes the bridge", async () => {
   const app = harness({ failInitialize: true, tool: () => ({ run }) });
   try {

@@ -10,6 +10,7 @@ import {
   AuthenticationError,
   ConfigurationError,
   Cursor,
+  JsonlLocalAgentStore,
   NetworkError,
   RateLimitError,
   type Run,
@@ -17,6 +18,7 @@ import {
 } from "@cursor/sdk";
 import { CursorSdkAdapter, mapSdkError } from "../src/cursor-sdk-adapter.js";
 import { RelayError } from "../src/errors.js";
+import { SdkStorage } from "../src/sdk-storage.js";
 
 function fakeRun(
   id: string,
@@ -199,11 +201,107 @@ test("adapter keeps SDK agent alive until release and closes exactly once", asyn
       settingSources: ["project"],
     });
     assert.equal(closes, 0);
+    assert.equal(handle.executionOwnership, "owned");
     await handle.release();
     await handle.release();
     assert.equal(closes, 1);
   } finally {
     Object.defineProperty(Agent, "create", descriptor);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("getRun is detached observation and never creates an execution agent", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cursor-relay-adapter-"));
+  const descriptor = Object.getOwnPropertyDescriptor(Agent, "getRun");
+  assert.ok(descriptor);
+  try {
+    Object.defineProperty(Agent, "getRun", {
+      configurable: true,
+      value: async () => fakeRun("persisted", "agent", Date.now()),
+    });
+    const handle = await new CursorSdkAdapter(dir).getRun("persisted", dir);
+    assert.equal(handle.executionOwnership, "detached");
+    assert.equal(handle.id, "persisted");
+    await handle.release();
+  } finally {
+    Object.defineProperty(Agent, "getRun", descriptor);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("SQLite observers retain detached ownership and legacy replies cannot discard context", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cursor-relay-adapter-routing-"));
+  const descriptor = Object.getOwnPropertyDescriptor(Agent, "getRun");
+  assert.ok(descriptor);
+  const pool = new SdkStorage(dir);
+  try {
+    const lease = await pool.acquire(dir);
+    await lease.store.agents.create({
+      agent: {
+        agentId: "new-agent",
+        cwd: dir,
+        status: "idle",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    });
+    await lease.store.runs.create({
+      run: {
+        runId: "new-run",
+        agentId: "new-agent",
+        turnNumber: 1,
+        status: "finished",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    });
+    await lease.release();
+    Object.defineProperty(Agent, "getRun", {
+      configurable: true,
+      value: async (
+        _id: string,
+        options: {
+          store: { runs: { list(): Promise<{ items: readonly unknown[] }> } };
+        },
+      ) => {
+        assert.equal((await options.store.runs.list()).items.length, 1);
+        return fakeRun("new-run", "new-agent", 1);
+      },
+    });
+    const adapter = new CursorSdkAdapter(dir);
+    const handle = await adapter.getRun("new-run", dir);
+    assert.equal(handle.executionOwnership, "detached");
+    assert.equal(handle.supports("cancel"), true);
+    await handle.release();
+    const old = new JsonlLocalAgentStore(join(dir, "cursor-sdk"));
+    await old.agents.create({
+      agent: {
+        agentId: "old-agent",
+        cwd: dir,
+        status: "idle",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    });
+    await assert.rejects(
+      adapter.reply("old-agent", "continue", {
+        agentId: "old-agent",
+        idempotencyKey: "reply",
+        workspace: dir,
+        model: { id: "model" },
+        sandboxEnabled: true,
+        autoReview: true,
+        settingSources: [],
+      }),
+      (error: unknown) =>
+        error instanceof RelayError &&
+        error.code === "SDK_LEGACY_STORE_READ_ONLY",
+    );
+    adapter.dispose();
+  } finally {
+    pool.dispose();
+    Object.defineProperty(Agent, "getRun", descriptor);
     await rm(dir, { recursive: true, force: true });
   }
 });

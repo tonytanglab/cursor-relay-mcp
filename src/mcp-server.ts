@@ -219,7 +219,7 @@ export function createMcpServer(service: RelayService): McpServer {
     "get_run",
     {
       description:
-        "读取一个持久运行的当前状态，并在进程重启后自动重连 Cursor SDK 运行。",
+        "读取持久运行并重新附加事件观察；本地执行器退出后不会自动重启模型，execution.state=unknown 时需诊断。",
       inputSchema: { relayRunId: z.string().min(1) },
       annotations: readOnlyAnnotations(true),
       _meta: appCallableMeta(),
@@ -280,7 +280,7 @@ export function createMcpServer(service: RelayService): McpServer {
     "wait_run",
     {
       description:
-        "最多等待 30 秒。terminal=false 时 mustCallAgain=true，调用方必须继续轮询。",
+        "最多等待 30 秒。mustCallAgain=true 时继续轮询；needsAttention=true 时停止无条件轮询并诊断，不能把未知执行状态当作失败或完成。",
       inputSchema: {
         relayRunId: z.string().min(1),
         waitMs: z.number().int().min(0).max(30_000).optional(),

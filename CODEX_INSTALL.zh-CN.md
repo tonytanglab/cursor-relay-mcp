@@ -2,6 +2,30 @@
 
 本文用于在一台新的 Windows 电脑上，把 `cursor-relay-mcp` 安装为 Codex 个人插件，并完成一次真实 Cursor 模型调用。内容基于 2026-08-26 的本机实测；Codex 内部 CLI 路径可能随桌面版升级变化，因此优先使用系统可执行的 `codex` 命令，只在它被 WindowsApps 拒绝时使用文中的备用路径。
 
+## 其它电脑升级提醒（2026-09-06）
+
+本次更新包含工作区 SQLite 存储、未知执行状态保护，以及本机进度链接。仅拉取 Git 不会更新已安装插件；旧任务也不能作为新版本验收依据。
+
+1. 先让本机正在执行的 Cursor 子任务收尾；保留 runId、原登录和状态目录。不要为了升级取消运行或删除旧缓存、JSONL、checkpoint、SQLite。
+2. 在本机实际插件源目录确认工作树改动来源后执行下列命令；有本地改动或非快进冲突时先合并，不强制覆盖。构建和依赖不会随 Git 推送。
+
+   ```powershell
+   git pull --ff-only
+   npm ci
+   npm run build
+   npm run test:mcp
+   npm run check:package
+   codex plugin add cursor-relay-mcp@personal
+   codex plugin list
+   ```
+
+3. 确认 personal marketplace 指向本机源目录，installed/enabled 且缓存 manifest 版本与源目录一致；非 personal 安装使用本机实际 marketplace 名称。不要复制开发机绝对路径，也不要重复注册同名 MCP。自行修改源码后，按本文 cachebuster 流程更新版本再重装。
+4. 在新建的 Codex 任务中发现并调用原生 `doctor`、`list_models`。`doctor.capabilities` 必须包含 `newRunStorage=workspace-sqlite-v1`、`legacyStorage=read-only`、`localExecutionRestartRecovery=false`、`localProgressLinks=true`。工具缺失时记录缺少的工具、安装版本及配置位置；先核对启用和加载状态，必要时在任务收尾后重开 Codex。不能凭 Skill 可见或文件存在声称 MCP 可用，也不要用临时 shell RPC 替代验收。
+5. 先确认目标工作区和真实模型调用授权。白名单外通过 `authorize_workspace` 签发本对话精确路径权限；模型和参数取自 `list_models`。只读测试使用 `read-only`，读写测试使用 `workspace-write`，仅创建事先指定的临时文件；提示只传路径与范围。持续原生 `wait_run` 至终态、消费最终答复，并独立核对写入及读回结果。
+6. `needsAttention=true` 或 `execution.state=unknown` 时停止自动轮询，核实原执行器；即使期限已过，也不自动取消或把未知运行判为失败。已有 runId 不得因界面或连接问题重复提交。进度沙箱失败时调用 `open_run` 获取本机链接；此链接不应分享给其它电脑。
+
+每台电脑保留自己的 stored login；Git 更新不会同步登录、对话授权或运行状态。旧 JSONL 历史保持只读，不能自动续写或假装执行恢复。本机已完成 GROK 4.6/high/fast=false 的读取、写入、读回及 SQLite 落盘验证；其它电脑仍须在自己的原生连接上验收。
+
 ## 最短结论
 
 推荐把仓库直接克隆到：
@@ -433,6 +457,9 @@ MCP App `Transport closed` 避坑：
 - 插件升级、cachebuster 重装、Codex 后端刷新或任务休眠都可能结束旧子进程。旧任务不会热加载新插件；恢复顺序是“重新进入任务触发刷新 → 新建任务复验 → 必要时完全退出并重开 Codex”，不要在旧 transport 上无限重试。
 - Relay 会在接受 MCP 请求前调用 Cursor SDK 公共 `CursorAgentPlatform.prewarmLocalWorkspace()`，加载首次 `agent.send` 需要的本地执行器分块，随即释放预热执行器；云目录分支则使用本地必失败的无网络探针预载，探针以不合法 HTTP 头在网络发送前立即终止，不读取、不替换也不输出真实凭据。这样可避免 Codex 清理旧插件缓存后，仍存活的进程在 `list_models` 或首次 `agent.send` 时找不到 `dist/esm/<chunk>.js`。如果旧版明确报缺少数字分块（例如 `642.js`、`877.js`），说明任务仍绑定升级前进程，必须安装含本修复的新版本并新建任务，不能在原任务继续验收。
 - 若 `start_run` 已经返回 `relayRunId`，不要因面板加载失败重复提交。连接恢复后使用原 `relayRunId` 调用 `get_run` / `wait_run`，以持久状态为准；只有服务器明确返回未创建运行时才能使用原 `idempotencyKey` 安全重试。
+- 本地 SDK 的 `getRun` 只建立持久事件观察句柄，不会重新启动已退出的执行器。`needsAttention=true` / `execution.state=unknown` 时停止无条件轮询，由主任务核对原执行进程；不要把重放的 RUNNING 事件当作新的模型进度，也不要因观察进程不同就断言执行器死亡。另一个任务仍可能在执行，原状态保留；可以显式再次读取终态，但不得自动取消或重复提交计费运行。
+- 新运行使用 SDK 公开 SQLite 存储，位于配置状态目录的 `cursor-sdk-sqlite-v1/<工作区路径哈希>/`，避免旧 JSONL 每个流片段全量读写历史。存储由适配器租约持有，最后一个运行/观察句柄释放后关闭；关闭 MCP 时拒绝新租用，活跃句柄正常收尾。
+- 原 `cursor-sdk` JSONL 与 checkpoint 保留为只读历史，不做自动迁移。旧会话 `reply_run` 和取消操作返回 `SDK_LEGACY_STORE_READ_ONLY`；不得静默新建无上下文会话替代，也不能把升级前仍在执行的实例改为新存储。插件回滚时保留新 SQLite 子目录，否则会丢失升级后历史。
 - 若新任务也失败，再查 Codex 日志中该任务的 `mcp_server_startup_status_updated`。曾出现 `ready` 后才变为 `Transport closed` 与从未达到 `ready` 是两类问题，前者查生命周期/重载，后者查启动命令、Node.js、构建和缓存。
 
 ## 三分钟验收清单

@@ -32,7 +32,21 @@ export async function main() {
     new StateStore(config.stateDir),
     sdk,
   );
-  await createMcpServer(service).connect(new StdioServerTransport());
+  const server = createMcpServer(service);
+  const closeServerResources = server.server.onclose;
+  server.server.onclose = () => {
+    try {
+      closeServerResources?.();
+    } finally {
+      sdk.dispose();
+    }
+  };
+  try {
+    await server.connect(new StdioServerTransport());
+  } catch (error) {
+    sdk.dispose();
+    throw error;
+  }
 }
 
 export async function isDirectExecution(

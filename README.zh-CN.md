@@ -4,11 +4,13 @@
 
 > `@cursor/sdk` 仍为 public beta。本项目把它精确锁定为 `1.0.30`，并提供 SDK 导出契约测试；升级前请先修改版本并运行完整兼容测试。
 
+> **其它电脑升级提醒：** 拉取代码后需重新构建并安装插件，在新任务核验原生工具和真实读写结果。不要取消既有任务或删除状态；详见[升级步骤](./CODEX_INSTALL.zh-CN.md#其它电脑升级提醒2026-09-06)。
+
 ## 能力
 
 - 通过 Cursor 账户实时发现模型、别名和可选参数，不维护易过期的静态模型表。
 - 幂等 `start_run` / `reply_run`，相同键和相同请求返回原运行；不同请求返回结构化冲突。
-- Relay 状态采用原子 UTF-8 JSON，Cursor SDK 状态采用官方 `JsonlLocalAgentStore`；进程重启后可通过 `Agent.getRun` 重连。
+- Relay 状态采用原子 UTF-8 JSON，新 Cursor 运行采用工作区隔离的官方 SQLite 存储，旧 JSONL 历史只读保留。`Agent.getRun` 可重新观察持久事件，不会重启原执行器；执行状态未知时停止自动轮询。
 - `wait_run` 每次最多等待 30 秒，未结束时明确返回 `mustCallAgain=true`。
 - `open_run` 提供不依赖 MCP 沙箱的本机只读进度链接；`view_run` 保留可选内嵌面板，查看状态、增量文本与最终输出。
 - 总运行超时、取消、有限事件缓冲、8 KiB 单事件上限、敏感字段名脱敏以及统一结构化错误。
@@ -134,7 +136,7 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 | `authorize_workspace`   | 为当前对话和精确工作区签发可复用的只读或读写 capability |
 | `start_run`             | 仅用目标位置、任务范围、明确权限和幂等键启动运行        |
 | `reply_run`             | 仅用目标位置与任务范围续接已结束的 Agent 会话           |
-| `get_run`               | 读取状态并在重启后重连                                  |
+| `get_run`               | 读取持久状态；未知执行需核实                            |
 | `view_run`              | 打开只读实时面板查看既有运行                            |
 | `open_run`              | 获取指定任务的本机只读进度链接，不依赖 MCP 沙箱         |
 | `read_run_progress`     | 只读持久状态与最多 200 条近期增量事件，不调用 SDK       |

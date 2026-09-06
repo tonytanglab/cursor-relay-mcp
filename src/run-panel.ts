@@ -100,6 +100,16 @@ export function projectRunPanelEvents(
   return entries;
 }
 
+export function runPanelShouldPoll(
+  run: { status: string; execution?: { state: string } } | undefined,
+): boolean {
+  return Boolean(
+    run &&
+      !["succeeded", "failed", "cancelled"].includes(run.status) &&
+      run.execution?.state !== "unknown",
+  );
+}
+
 export const RUN_PANEL_HTML = String.raw`<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -419,6 +429,7 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
         /* LOCAL_PROGRESS_MODE */
         const localProgress = window.cursorRelayLocalProgress === true;
         const projectRunPanelEvents = ${projectRunPanelEvents.toString()};
+        const runPanelShouldPoll = ${runPanelShouldPoll.toString()};
         const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
         const STATUS_LABELS = {
           starting: "正在启动",
@@ -735,7 +746,7 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
 
         function render() {
           const run = state.run;
-          const active = Boolean(run && !TERMINAL.has(run.status));
+          const active = runPanelShouldPoll(run);
           byId("pulse").dataset.active = String(active);
           text(
             "liveText",
@@ -751,8 +762,8 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           );
           const status = byId("status");
           status.dataset.status = run ? run.status : "unknown";
-          status.textContent = run ? STATUS_LABELS[run.status] || run.status : "未知";
-          const errorMessage = state.lastError || (run && run.error && run.error.message) || "";
+          status.textContent = run && run.execution && run.execution.state === "unknown" ? "执行状态待核实" : run ? STATUS_LABELS[run.status] || run.status : "未知";
+          const errorMessage = state.lastError || (run && run.execution && run.execution.message) || (run && run.error && run.error.message) || "";
           byId("errorCard").hidden = !errorMessage;
           text("error", errorMessage);
           if (!run) return;
@@ -790,7 +801,7 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
                 });
                 if (state.destroyed) break;
                 accept(result);
-                if (state.run && TERMINAL.has(state.run.status)) break;
+                if (state.run && !runPanelShouldPoll(state.run)) break;
               } catch (error) {
                 if (state.destroyed) break;
                 reportError(error);
@@ -869,7 +880,7 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
         render();
         if (localProgress) void pump();
         renderTimer = window.setInterval(() => {
-          if (state.run && !TERMINAL.has(state.run.status)) render();
+          if (runPanelShouldPoll(state.run)) render();
         }, 1_000);
       })();
     </script>

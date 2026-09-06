@@ -1,6 +1,6 @@
 {
   "name": "cursor-relay-mcp",
-  "version": "0.1.1",
+  "version": "0.1.1+codex.20260906134859",
   "description": "Durable, model-selected Cursor Agent delegation through MCP.",
   "author": {
     "name": "cursor-relay-mcp contributors"
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Cursor Relay MCP",
     "shortDescription": "Delegate durable tasks to a chosen Cursor model.",
-    "longDescription": "Discover account models and delegate local workspace tasks to Cursor Agent with durable runs, polling, restart recovery, bounded events, timeouts, and structured errors.",
+    "longDescription": "Discover account models and delegate local workspace tasks to Cursor Agent with durable history, workspace SQLite, execution uncertainty reporting, bounded events, and progress links.",
     "developerName": "cursor-relay-mcp contributors",
     "category": "Developer Tools",
     "capabilities": [

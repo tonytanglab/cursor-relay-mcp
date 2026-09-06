@@ -2,6 +2,47 @@
 
 ## 0.1.1
 
+### 🕒 2026-09-06 21:53 | [FIX] 合并跨电脑更新并补齐读写委派验收
+
+- **变更内容**：合并远端本机进度链接与沙箱显示修复，保留工作区 SQLite、旧历史只读及未知执行语义；补齐未知执行跨截止时间不自动取消/失败、面板停止刷新和 MCP 关闭资源链。更新缓存版本至 `0.1.1+codex.20260906134859`，不升级 SDK。
+- **其它电脑**：README 与安装手册新增升级提醒，要求拉取后构建、重装并核对原生工具与能力；白名单外签发本对话精确工作区权限，真实读写必须等待终态并读回验证。不要复制登录、授权、状态或本机进度链接，不因显示失败重复计费。
+- **原生实测**：已安装 SQLite 批的 GROK 4.6/high/fast=false 运行成功读取包名、写入独立临时文件并读回；主任务确认 UTF-8 无 BOM 及 SQLite FINISHED/329原始事件。此证据不等于本次合并后的新安装或其它电脑已经验收。
+- **验证结果**：干净集成工作区 format:check、lint、typecheck、85/85测试、build、test:mcp（14工具）、check:package、插件/Skill校验、20个暂存文件严格UTF-8无BOM及git diff --check通过。首轮测试暴露fixture清理未等监控释放，已修正并全量复验；lint首次与临时目录测试并行触发ENOENT，串行复验通过。本机旧工作区的临时脚本不进入提交或包。
+- **已知限制**：旧 JSONL 会话不自动迁移；不能恢复已退出的本地执行器。锁定依赖的 npm audit 报4项（3 moderate、1 high，包含 SDK 传递依赖），本次未更换 SDK/锁文件，需单独兼容评估。
+- **回滚方案**：回退本次提交并构建重装，保留新旧状态；旧版本无法读取新 SQLite，不能据此重提任务。
+
+### 🕒 2026-09-06 15:10 | [CHORE] 记录 Cursor SQLite 插件安装与原生验收边界
+
+- **变更内容**：官方cachebuster与plugin add已安装`0.1.1+codex.20260906065356`；旧实例GROK只读评审在安装后继续完成，终态succeeded、367事件。CLI保留活跃初始缓存，自动清理未活跃中间缓存；未重启活跃实例或迁移旧状态。
+- **涉及文件**：`.codex-plugin/plugin.json`、本日志；原始评审及验证报告位于未跟踪`.tmp`目录，不入包。
+- **回滚方案**：撤回本批代码并重建重装；保留新旧存储目录。未执行提交或推送。
+- **⚠️ 注意**：新子任务未加载任何Cursor原生工具，无法实测新版doctor/SQLite模型运行；需新的Codex任务加载后验收。旧会话直接reply仍明确受阻，不能丢弃上下文替代。
+- **验证结果**：源码验证沿用本批70/70与随后真实旧SDK读取4/4、typecheck/build/test:mcp/check:package通过结果；安装cache中确认公开SQLite实现和能力字段；旧GROK完成不能充当新SQLite端到端验证。
+
+### 🕒 2026-09-06 14:17 | [PERF] 新运行使用工作区隔离的 SDK SQLite 存储
+
+- **变更内容**：固定 SDK 1.0.30，复用公开 `@cursor/sdk/sqlite`，按规范化工作区路径分库；适配器持有可排空的租约，owned/detached 与资源释放独立。旧 JSONL/checkpoint 只读保留，旧续写/取消明确阻塞，不静默丢弃会话。doctor 声明新旧存储能力。
+- **涉及文件**：`src/sdk-storage.ts`、`src/cursor-sdk-adapter.ts`、`src/index.ts`、`src/relay-service.ts`、存储/适配器/运行测试、安装说明与 Skill。
+- **回滚方案**：撤回本批代码并重建、重装插件；保留两种状态目录，不删除新 SQLite 历史；旧插件无法读取新存储，回退期间不可声称新运行丢失或重复执行。
+- **⚠️ 注意**：活跃旧实例仍使用原存储；本条记录时尚未安装 SQLite 批，待原 GROK 终态后安装，新任务加载。首次 Transport closed 的退出原因未证实。
+- **验证结果**：全量测试 70/70、typecheck、build、test:mcp（12工具）、check:package 通过；工作区隔离、两进程同 run 并发追加、重开读取、租约排空、旧 fixture 字节不变通过；128 MiB 历史追加100小片段本机离线约4.2ms，不代表模型端到端耗时。两次测试夹具失败已修正（先建agent满足外键；等待双方monitor释放后清理）。全量格式/lint仍被预存 manifest/.tmp 脚本阻塞，改动文件定向检查通过。
+
+### 🕒 2026-09-06 13:05 | [FIX] 捕捉恢复待核实状态的面板轮询边界
+
+- **变更内容**：面板识别 execution=unknown，显示待核实原因并停止自动轮询，避免 needsAttention 返回后形成紧密请求循环；观察句柄终结时释放进程内跟踪集合。
+- **涉及文件**：`src/run-panel.ts`、`src/relay-service.ts`、`tests/mcp-server.test.ts`。
+- **回滚方案**：撤回本次 diff 并重建、重装插件。
+- **⚠️ 注意**：新任务才会加载新版。
+- **验证结果**：与本次恢复语义改动共同执行定向回归、类型检查与 MCP 冒烟，结果在子任务交付中列明。
+
+### 🕒 2026-09-06 13:01 | [FIX] 区分 Cursor 本地执行与持久事件观察
+
+- **变更内容**：SDK 适配器区分 owned/detached；观察旧运行时返回 execution=unknown、needsAttention=true、mustCallAgain=false，不再把事件回放宣称为模型恢复，不自动取消或重复提交。原状态保留，活跃兄弟进程的最终结果仍可读取。同步修正工具描述和使用规范。
+- **涉及文件**：`src/sdk-port.ts`、`src/cursor-sdk-adapter.ts`、`src/types.ts`、`src/relay-service.ts`、`src/mcp-server.ts`、对应测试、`skills/delegate-to-cursor-agent/SKILL.md`、`CODEX_INSTALL.zh-CN.md`。
+- **回滚方案**：仅撤回本次 diff 并重建、重新安装；不修改已有 SDK 或 Relay 状态文件。
+- **⚠️ 注意**：需重新安装插件并用新任务加载；旧 stdio 连接不能热恢复。首次 Transport closed 的进程退出原因没有足够日志证明，本次修正可证实的错误恢复语义。
+- **验证结果**：typecheck、build、check:package、test:mcp 通过；全量测试 63/63 通过，随后新增/调整的适配器与 detached 回归 3/3 通过；改动源码定向 eslint 通过。全量 format:check 被预存 manifest 与 `.tmp` 脚本格式阻塞，lint 被预存 `.tmp` 脚本工程范围阻塞。新会话原生 GROK 4.6 只读任务 `crun-2568b5c0-8331-473b-a4e1-0c68e8cbdfce` 成功读取 package.json 并返回正确项目名/SDK 版本；旧运行未恢复执行，不冒充完成。
+
 - 2026-09-03 15:35：修复进度显示层故障被误认为任务挂掉的问题：启动/续接工具不再自动创建 MCP 沙箱，新增 `open_run` 本机单任务令牌链接与 `read_run_progress` 纯快照接口，拒绝跨站与写操作，保留 24 小时任务总预算；内嵌面板修复首次读取失败停刷、终态事件不补读、初始化错误不可见、桥接无超时和关闭不清理等缺陷，优先标准桥接并支持重试，事件内存限制为最近 200 条且保持文本连续展示。同步修正默认提示超过 128 字符及 doctor 的过期 SDK 版本说明，补充安全、恢复、生命周期测试与沙箱握手故障排查文档；不修改宿主沙箱、不重发或取消既有任务。
 - 2026-09-02 22:57：修复 Codex 插件升级后旧任务先能执行 `doctor` / `list_models`，首次 `agent.send` 却因旧缓存已清理而缺少 Cursor SDK 懒加载数字分块、继而出现 `Transport closed` 的生命周期故障：MCP 接受请求前通过 SDK 公共 `CursorAgentPlatform.prewarmLocalWorkspace()` 预载并释放本地执行器，以本地必失败的无网络模型目录探针预载云目录分支，使 Webpack 运行时在旧缓存目录被清理后仍可完成存量调用；新增真实缓存分块删除回归测试、启动前完整性检查、包校验及旧任务恢复说明。
 - 2026-09-02 22:48：补充 Codex MCP App `resources/read ... Transport closed` 的分层诊断与恢复流程：明确区分旧任务 transport 被回收/重载与新任务启动失败，要求用 `doctor`、`list_models` 和面板资源读取交叉验收；记录插件更新后旧任务不会热加载、不得因面板失败重复提交 Cursor 运行，以及应凭原 `relayRunId` / `idempotencyKey` 恢复，避免把通道错误误判为模型结论或仓库损坏。

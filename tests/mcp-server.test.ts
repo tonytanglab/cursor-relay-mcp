@@ -6,6 +6,7 @@ import { createMcpServer } from "../src/mcp-server.js";
 import type { RelayService } from "../src/relay-service.js";
 import {
   projectRunPanelEvents,
+  runPanelShouldPoll,
   RUN_PANEL_HTML,
   RUN_PANEL_MIME_TYPE,
   RUN_PANEL_URI,
@@ -223,6 +224,17 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
     await client.close();
     await server.close();
   }
+});
+
+test("run panel stops automatic polling for unknown execution and terminal states", () => {
+  assert.equal(runPanelShouldPoll({ status: "running" }), true);
+  assert.equal(
+    runPanelShouldPoll({ status: "running", execution: { state: "unknown" } }),
+    false,
+  );
+  for (const status of ["succeeded", "failed", "cancelled"])
+    assert.equal(runPanelShouldPoll({ status }), false);
+  assert.equal(runPanelShouldPoll(undefined), false);
 });
 
 test("run panel polls actual Relay data without mutating a run", () => {

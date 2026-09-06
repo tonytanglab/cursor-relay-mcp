@@ -35,6 +35,8 @@ export interface CursorRunResult {
 }
 export type CursorRunOperation = "stream" | "wait" | "cancel";
 export interface CursorRunHandle {
+  /** Detached local handles observe persisted events; they do not restart execution. */
+  executionOwnership?: "owned" | "detached";
   id: string;
   requestId?: string | undefined;
   agentId: string;

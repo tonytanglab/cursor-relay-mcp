@@ -42,6 +42,8 @@ const CANCEL_REQUEST_GRACE_MS = 1_000;
 const CANCEL_MONITOR_DRAIN_MS = 250;
 
 export class RelayService {
+  // Failed observations stay unknown until reattached or a terminal read clears them.
+  private readonly detachedRuns = new Set<string>();
   private readonly monitors = new Map<string, Promise<void>>();
   private readonly launches = new Map<string, Promise<void>>();
   private modelCache: { expiresAt: number; models: CursorModel[] } | undefined;
@@ -85,6 +87,9 @@ export class RelayService {
         embeddedSourceArgumentsRejected: true,
         cursorManagedNetworkAccess: true,
         transientReconnectKeepsRunAlive: true,
+        localExecutionRestartRecovery: false,
+        newRunStorage: "workspace-sqlite-v1",
+        legacyStorage: "read-only",
         activeRunSteering: false,
         activeRunSteeringReason: `@cursor/sdk ${CURSOR_SDK_VERSION} 的公开 Run API 仅支持 stream、wait、cancel 与 conversation；Relay 不会把内部事件追加伪装成已向运行中的 Agent 送达纠偏指令`,
       },
@@ -335,11 +340,19 @@ export class RelayService {
   async getRun(relayRunId: string): Promise<RelayRunSummary> {
     const run = await this.requireRun(relayRunId);
     await this.ensureAttached(run);
-    return summarize(await this.requireRun(relayRunId));
+    return summarize(
+      await this.requireRun(relayRunId),
+      undefined,
+      this.detachedRuns.has(relayRunId),
+    );
   }
 
   async getRunSnapshot(relayRunId: string): Promise<RelayRunSummary> {
-    return summarize(await this.requireRun(relayRunId));
+    return summarize(
+      await this.requireRun(relayRunId),
+      undefined,
+      this.detachedRuns.has(relayRunId),
+    );
   }
 
   async getRunProgressSnapshot(relayRunId: string, afterSequence = 0) {
@@ -349,7 +362,12 @@ export class RelayService {
       .filter((event) => event.sequence > afterSequence)
       .slice(-200);
     return {
-      run: summarize(run),
+      run: summarize(
+        run,
+        undefined,
+        this.detachedRuns.has(relayRunId) ||
+          (!this.monitors.has(relayRunId) && !this.launches.has(relayRunId)),
+      ),
       events,
       nextSequence: events.at(-1)?.sequence ?? afterSequence,
       snapshotOnly: true,
@@ -398,6 +416,9 @@ export class RelayService {
     if (connectionError) {
       await delay(Math.min(Math.max(waitMs, 0), 1_000));
       return waitPayload(await this.requireRun(relayRunId), connectionError);
+    }
+    if (this.detachedRuns.has(relayRunId)) {
+      return waitPayload(run, undefined, true);
     }
     const monitor = this.monitors.get(relayRunId);
     if (monitor)
@@ -597,10 +618,21 @@ export class RelayService {
 
   private attachMonitor(relayRunId: string, handle: CursorRunHandle) {
     if (this.monitors.has(relayRunId)) return;
+    if (handle.executionOwnership === "detached")
+      this.detachedRuns.add(relayRunId);
     const monitor = this.monitor(relayRunId, handle)
+      .then(() => {
+        this.detachedRuns.delete(relayRunId);
+      })
       .catch(async (error: unknown) => {
         const relayError = asRelayError(error, "SDK_MONITOR_FAILED");
         try {
+          if (handle.executionOwnership === "detached") {
+            await this.appendEvent(relayRunId, "observation_error", {
+              message: relayError.message,
+            });
+            return;
+          }
           await this.patchRun(
             relayRunId,
             { status: "failed", error: relayError.toJSON() },
@@ -610,7 +642,9 @@ export class RelayService {
           /* The monitor must never create an unhandled rejection. */
         }
       })
-      .finally(() => this.monitors.delete(relayRunId));
+      .finally(() => {
+        this.monitors.delete(relayRunId);
+      });
     this.monitors.set(relayRunId, monitor);
   }
 
@@ -619,6 +653,11 @@ export class RelayService {
     const remaining = Math.max(0, Date.parse(run.deadlineAt) - Date.now());
     const flow = this.consumeThenWait(relayRunId, handle);
     try {
+      if (handle.executionOwnership === "detached") {
+        // An observer cannot enforce the original executor's deadline.
+        await this.finishFromOutcome(relayRunId, await flow);
+        return;
+      }
       const raced = await raceWithDeadline(flow, remaining);
       if (raced.kind === "outcome") {
         await this.finishFromOutcome(relayRunId, raced.outcome);
@@ -792,6 +831,10 @@ export class RelayService {
         /* A missing handle cannot prevent recording the elapsed deadline. */
       }
     }
+    if (handle?.executionOwnership === "detached") {
+      this.attachMonitor(run.relayRunId, handle);
+      return;
+    }
     try {
       if (
         handle &&
@@ -916,6 +959,7 @@ export class RelayService {
     const run = (await this.store.read()).runs[relayRunId];
     if (!run)
       throw new RelayError("RUN_NOT_FOUND", `运行不存在：${relayRunId}`);
+    if (TERMINAL.has(run.status)) this.detachedRuns.delete(relayRunId);
     return run;
   }
 
@@ -1054,13 +1098,17 @@ export class RelayService {
 function waitPayload(
   run: RelayRun,
   connectionError?: ReturnType<RelayError["toJSON"]>,
+  detached = false,
 ) {
   const terminal = TERMINAL.has(run.status);
+  const needsAttention = !terminal && detached;
   return {
-    run: summarize(run, connectionError),
+    run: summarize(run, connectionError, detached),
     terminal,
-    mustCallAgain: !terminal,
-    ...(terminal
+    needsAttention,
+    mustCallAgain: !terminal && !needsAttention,
+    ...(needsAttention ? { instruction: DETACHED_EXECUTION_MESSAGE } : {}),
+    ...(terminal || needsAttention
       ? {}
       : {
           nextPollAfterMs: 1_000,
@@ -1265,11 +1313,21 @@ function boundEventData(data: unknown): unknown {
 function summarize(
   run: RelayRun,
   connectionError?: ReturnType<RelayError["toJSON"]>,
+  detached = false,
 ): RelayRunSummary {
   const { events, ...summary } = run;
   return {
     ...summary,
     eventCount: events.length,
+    ...(detached && !TERMINAL.has(run.status)
+      ? {
+          execution: {
+            state: "unknown" as const,
+            observation: "detached" as const,
+            message: DETACHED_EXECUTION_MESSAGE,
+          },
+        }
+      : {}),
     ...(connectionError
       ? {
           connection: {
@@ -1280,6 +1338,9 @@ function summarize(
       : {}),
   };
 }
+
+const DETACHED_EXECUTION_MESSAGE =
+  "当前仅观察本地持久事件，无法确认原执行器是否仍存活；事件回放不代表模型恢复。停止无条件轮询并交回主任务诊断原执行器，勿自动重启、取消或重复计费。其它进程仍可能在执行，未将运行判为失败；可显式再次读取最终状态。";
 
 function outcomeMetadata(outcome: CursorRunResult): Partial<RelayRun> {
   return {

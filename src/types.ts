@@ -65,6 +65,11 @@ export interface RelayRun {
 
 export type RelayRunSummary = Omit<RelayRun, "events"> & {
   eventCount: number;
+  execution?: {
+    state: "unknown";
+    observation: "detached";
+    message: string;
+  };
   connection?: {
     state: "reconnecting";
     error: RelayErrorShape;

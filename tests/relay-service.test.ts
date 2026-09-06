@@ -17,6 +17,7 @@ import type {
 import { StateStore } from "../src/state-store.js";
 
 class FakeRun implements CursorRunHandle {
+  executionOwnership: "owned" | "detached" = "owned";
   status: CursorRunHandle["status"] = "running";
   private resolveResult!: (result: CursorRunResult) => void;
   private rejectResult!: (error: unknown) => void;
@@ -649,7 +650,155 @@ test("Codex-controlled tool policy is persisted and inherited by replies", async
   }
 });
 
-test("a new service instance reconnects a persisted SDK run", async () => {
+test("detached observation reports unknown execution without failing or restarting an active sibling run", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "persist",
+      model: { id: "cursor-test" },
+      idempotencyKey: "detached-observation",
+    });
+    const handle = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(handle);
+    handle.executionOwnership = "detached";
+    const observer = new RelayService(item.config, item.store, item.sdk);
+    const waiting = await observer.waitRun(started.run.relayRunId, 0);
+    assert.equal(waiting.run.status, "running");
+    assert.equal(waiting.run.execution?.state, "unknown");
+    assert.equal(waiting.terminal, false);
+    assert.equal(waiting.needsAttention, true);
+    assert.equal(waiting.mustCallAgain, false);
+    assert.equal(handle.cancelled, false);
+    assert.equal(
+      (await observer.getRun(started.run.relayRunId)).execution?.observation,
+      "detached",
+    );
+    handle.finish({ status: "finished", result: "actual sibling output" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+    const done = await observer.waitRun(started.run.relayRunId, 0);
+    assert.equal(done.terminal, true);
+    assert.equal(done.needsAttention, false);
+    assert.equal(done.run.execution, undefined);
+    assert.equal(done.run.assistantText, "actual sibling output");
+    // Persisted terminal status can precede the second monitor's cleanup.
+    const releaseDeadline = Date.now() + 2_000;
+    while (handle.released < 2 && Date.now() < releaseDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(handle.released, 2);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+test("detached observation errors preserve unknown execution until a real outcome arrives", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "observe connection loss",
+      model: { id: "cursor-test" },
+      idempotencyKey: "detached-observation-error",
+    });
+    const owner = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(owner);
+    const handle = new FakeRun(owner.id, owner.agentId);
+    handle.executionOwnership = "detached";
+    item.sdk.runs.set(handle.id, handle);
+    const observer = new RelayService(item.config, item.store, item.sdk);
+    await observer.getRun(started.run.relayRunId);
+    handle.fail(new Error("observer disconnected"));
+    const releaseDeadline = Date.now() + 2_000;
+    let state = await item.store.read();
+    while (
+      !state.runs[started.run.relayRunId]?.events.some(
+        (event) => event.type === "observation_error",
+      ) &&
+      Date.now() < releaseDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      state = await item.store.read();
+    }
+    assert.equal(handle.released, 1);
+    const snapshot = await observer.getRunSnapshot(started.run.relayRunId);
+    assert.equal(snapshot.status, "running");
+    assert.equal(snapshot.execution?.state, "unknown");
+    assert.equal(handle.cancelled, false);
+    assert.ok(
+      state.runs[started.run.relayRunId]?.events.some(
+        (event) => event.type === "observation_error",
+      ),
+    );
+    owner.finish({ status: "finished", result: "executor completed" });
+    await item.service.waitRun(started.run.relayRunId, 2_000);
+    const ownerReleaseDeadline = Date.now() + 2_000;
+    while (owner.released === 0 && Date.now() < ownerReleaseDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(owner.released, 1);
+    const done = await observer.getRun(started.run.relayRunId);
+    assert.equal(done.status, "succeeded");
+    assert.equal(done.assistantText, "executor completed");
+    assert.equal(done.execution, undefined);
+  } finally {
+    await rm(item.dir, { recursive: true, force: true });
+  }
+});
+
+for (const deadlineOffset of [-1_000, 50]) {
+  test(`detached observation preserves unknown execution across deadline offset ${deadlineOffset}`, async () => {
+    const item = await fixture();
+    try {
+      const started = await item.service.startRun({
+        workspace: item.dir,
+        task: "observe persisted execution",
+        model: { id: "cursor-test" },
+        idempotencyKey: `detached-deadline-${deadlineOffset}`,
+      });
+      const handle = item.sdk.runs.get(started.run.sdkRunId ?? "");
+      assert.ok(handle);
+      handle.executionOwnership = "detached";
+      await item.store.update((state) => {
+        const run = state.runs[started.run.relayRunId];
+        assert.ok(run);
+        run.deadlineAt = new Date(Date.now() + deadlineOffset).toISOString();
+      });
+      const observer = new RelayService(item.config, item.store, item.sdk);
+      const snapshot = await observer.getRunProgressSnapshot(
+        started.run.relayRunId,
+      );
+      assert.equal(snapshot.run.execution?.state, "unknown");
+      assert.equal(handle.cancelled, false);
+      await observer.getRun(started.run.relayRunId);
+      // Cross both the deadline and the cancellation grace from the owned path.
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const pending = await observer.waitRun(started.run.relayRunId, 0);
+      assert.equal(pending.run.status, "running");
+      assert.equal(pending.run.execution?.state, "unknown");
+      assert.equal(pending.needsAttention, true);
+      assert.equal(pending.mustCallAgain, false);
+      assert.equal(handle.cancelled, false);
+      assert.equal(item.sdk.launches.length, 1);
+      handle.finish({ status: "finished", result: "late actual result" });
+      await item.service.waitRun(started.run.relayRunId, 2_000);
+      const releaseDeadline = Date.now() + 2_000;
+      while (handle.released < 2 && Date.now() < releaseDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const done = await observer.waitRun(started.run.relayRunId, 0);
+      assert.equal(done.run.status, "succeeded");
+      assert.equal(done.run.assistantText, "late actual result");
+      assert.equal(done.needsAttention, false);
+      assert.equal(done.run.execution, undefined);
+      assert.equal(handle.released, 2);
+    } finally {
+      await rm(item.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a new service instance observes a persisted SDK run while its executor remains alive", async () => {
   const item = await fixture();
   try {
     const started = await item.service.startRun({

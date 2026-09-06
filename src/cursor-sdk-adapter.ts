@@ -6,13 +6,12 @@ import {
   ConfigurationError,
   Cursor,
   CursorSdkError,
-  JsonlLocalAgentStore,
   NetworkError,
   RateLimitError,
   type AgentOptions,
+  type LocalAgentStore,
   type SDKMessage,
 } from "@cursor/sdk";
-import { resolve } from "node:path";
 import { RelayError } from "./errors.js";
 import type {
   AgentLaunchOptions,
@@ -21,18 +20,28 @@ import type {
   CursorSdkPort,
 } from "./sdk-port.js";
 import { warmCursorSdkRuntime } from "./sdk-runtime/index.js";
+import { SdkStorage, type StoreLease } from "./sdk-storage.js";
 
 export class CursorSdkAdapter implements CursorSdkPort {
-  private readonly store: JsonlLocalAgentStore;
+  private readonly storage: SdkStorage;
   private readonly environmentApiKeyConfigured: boolean;
 
   constructor(stateDir: string, environmentApiKeyConfigured = false) {
-    this.store = new JsonlLocalAgentStore(resolve(stateDir, "cursor-sdk"));
+    this.storage = new SdkStorage(stateDir);
     this.environmentApiKeyConfigured = environmentApiKeyConfigured;
   }
 
   async warmup(cwd = process.cwd()): Promise<void> {
-    await sdkCall(() => warmCursorSdkRuntime(this.store, cwd));
+    const lease = await this.storage.acquire(cwd);
+    try {
+      await sdkCall(() => warmCursorSdkRuntime(lease.store, cwd));
+    } finally {
+      await lease.release();
+    }
+  }
+
+  dispose(): void {
+    this.storage.dispose();
   }
 
   async authStatus() {
@@ -75,14 +84,40 @@ export class CursorSdkAdapter implements CursorSdkPort {
     task: string,
     options: AgentLaunchOptions,
   ): Promise<CursorRunHandle> {
-    const agent = await sdkCall(() => Agent.create(this.agentOptions(options)));
+    const lease = await this.storage.acquire(options.workspace);
+    return this.sendWithLease(task, options, lease);
+  }
+
+  private async sendWithLease(
+    task: string,
+    options: AgentLaunchOptions,
+    lease: StoreLease,
+    resumeAgentId?: string,
+  ): Promise<CursorRunHandle> {
+    let agent: Awaited<ReturnType<typeof Agent.create>> | undefined;
     try {
-      const run = await sdkCall(() =>
-        agent.send(task, { idempotencyKey: options.idempotencyKey }),
+      agent = await sdkCall(() =>
+        resumeAgentId
+          ? Agent.resume(resumeAgentId, this.agentOptions(options, lease.store))
+          : Agent.create(this.agentOptions(options, lease.store)),
       );
-      return wrapRun(run, () => agent.close());
+      const activeAgent = agent;
+      const run = await sdkCall(() =>
+        activeAgent.send(task, { idempotencyKey: options.idempotencyKey }),
+      );
+      return wrapRun(run, "owned", async () => {
+        try {
+          activeAgent.close();
+        } finally {
+          await lease.release();
+        }
+      });
     } catch (error) {
-      agent.close();
+      try {
+        agent?.close();
+      } finally {
+        await lease.release();
+      }
       throw error;
     }
   }
@@ -92,28 +127,43 @@ export class CursorSdkAdapter implements CursorSdkPort {
     task: string,
     options: AgentLaunchOptions,
   ): Promise<CursorRunHandle> {
-    const agent = await sdkCall(() =>
-      Agent.resume(agentId, this.agentOptions(options)),
-    );
+    const lease = await this.storage.acquire(options.workspace);
     try {
-      const run = await sdkCall(() =>
-        agent.send(task, { idempotencyKey: options.idempotencyKey }),
-      );
-      return wrapRun(run, () => agent.close());
+      if (
+        !(await lease.store.agents.get({ agentId })) &&
+        (await this.storage.legacy.agents.get({ agentId }))
+      ) {
+        throw new RelayError(
+          "SDK_LEGACY_STORE_READ_ONLY",
+          "该会话位于旧存储，继续前需要安全迁移；未丢弃原会话或新建替代运行",
+        );
+      }
     } catch (error) {
-      agent.close();
+      await lease.release();
       throw error;
     }
+    return this.sendWithLease(task, options, lease, agentId);
   }
 
   async getRun(runId: string, workspace: string): Promise<CursorRunHandle> {
     return await sdkCall(async () => {
-      const run = await Agent.getRun(runId, {
-        runtime: "local",
-        cwd: workspace,
-        store: this.store,
-      });
-      return wrapRun(run);
+      const lease = await this.storage.acquire(workspace);
+      try {
+        const found = await lease.store.runs.list({
+          filter: { runIds: [runId], limit: 1 },
+        });
+        const legacy = found.items.length === 0;
+        if (legacy) await lease.release();
+        const run = await Agent.getRun(runId, {
+          runtime: "local",
+          cwd: workspace,
+          store: legacy ? this.storage.legacy : lease.store,
+        });
+        return wrapRun(run, "detached", () => lease.release(), legacy);
+      } catch (error) {
+        await lease.release();
+        throw error;
+      }
     });
   }
 
@@ -123,46 +173,61 @@ export class CursorSdkAdapter implements CursorSdkPort {
     createdAfter: number,
   ): Promise<CursorRunHandle | undefined> {
     return await sdkCall(async () => {
-      const candidates: Awaited<ReturnType<typeof Agent.listRuns>>["items"] =
-        [];
-      const seenCursors = new Set<string>();
-      let cursor: string | undefined;
-      do {
-        const result = await Agent.listRuns(agentId, {
-          runtime: "local",
-          cwd: workspace,
-          store: this.store,
-          limit: 100,
-          ...(cursor ? { cursor } : {}),
-        });
-        candidates.push(
-          ...result.items.filter(
-            (run) =>
-              run.createdAt !== undefined && run.createdAt >= createdAfter,
-          ),
-        );
-        cursor = result.nextCursor;
-        if (cursor && seenCursors.has(cursor)) {
+      const lease = await this.storage.acquire(workspace);
+      try {
+        const legacy = !(await lease.store.agents.get({ agentId }));
+        if (legacy) await lease.release();
+        const candidates: Awaited<ReturnType<typeof Agent.listRuns>>["items"] =
+          [];
+        const seenCursors = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const result = await Agent.listRuns(agentId, {
+            runtime: "local",
+            cwd: workspace,
+            store: legacy ? this.storage.legacy : lease.store,
+            limit: 100,
+            ...(cursor ? { cursor } : {}),
+          });
+          candidates.push(
+            ...result.items.filter(
+              (run) =>
+                run.createdAt !== undefined && run.createdAt >= createdAfter,
+            ),
+          );
+          cursor = result.nextCursor;
+          if (cursor && seenCursors.has(cursor)) {
+            throw new RelayError(
+              "SDK_RUN_RECOVERY_AMBIGUOUS",
+              "Cursor SDK 运行分页游标重复，无法安全恢复",
+            );
+          }
+          if (cursor) seenCursors.add(cursor);
+        } while (cursor);
+        if (candidates.length > 1) {
           throw new RelayError(
             "SDK_RUN_RECOVERY_AMBIGUOUS",
-            "Cursor SDK 运行分页游标重复，无法安全恢复",
+            "找到多个可能的 Cursor SDK 运行，拒绝猜测恢复目标",
+            { details: { candidateCount: candidates.length } },
           );
         }
-        if (cursor) seenCursors.add(cursor);
-      } while (cursor);
-      if (candidates.length > 1) {
-        throw new RelayError(
-          "SDK_RUN_RECOVERY_AMBIGUOUS",
-          "找到多个可能的 Cursor SDK 运行，拒绝猜测恢复目标",
-          { details: { candidateCount: candidates.length } },
-        );
+        const candidate = candidates[0];
+        if (!candidate) {
+          await lease.release();
+          return undefined;
+        }
+        return wrapRun(candidate, "detached", () => lease.release(), legacy);
+      } catch (error) {
+        await lease.release();
+        throw error;
       }
-      const candidate = candidates[0];
-      return candidate ? wrapRun(candidate) : undefined;
     });
   }
 
-  private agentOptions(options: AgentLaunchOptions): AgentOptions {
+  private agentOptions(
+    options: AgentLaunchOptions,
+    store: LocalAgentStore,
+  ): AgentOptions {
     return {
       agentId: options.agentId,
       idempotencyKey: options.idempotencyKey,
@@ -176,7 +241,7 @@ export class CursorSdkAdapter implements CursorSdkPort {
         : {}),
       local: {
         cwd: options.workspace,
-        store: this.store,
+        store,
         settingSources: options.settingSources,
         autoReview: options.autoReview,
         sandboxOptions: { enabled: options.sandboxEnabled },
@@ -188,10 +253,13 @@ export class CursorSdkAdapter implements CursorSdkPort {
 
 function wrapRun(
   run: Awaited<ReturnType<typeof Agent.getRun>>,
-  close?: () => void,
+  ownership: "owned" | "detached",
+  close: () => Promise<void>,
+  readOnly = false,
 ): CursorRunHandle {
-  let released = false;
+  let released: Promise<void> | undefined;
   return {
+    executionOwnership: ownership,
     id: run.id,
     requestId: run.requestId,
     agentId: run.agentId,
@@ -199,7 +267,8 @@ function wrapRun(
     get status() {
       return run.status;
     },
-    supports: (operation) => run.supports(operation),
+    supports: (operation) =>
+      !(readOnly && operation === "cancel") && run.supports(operation),
     currentResult: () => currentResult(run),
     async *stream() {
       try {
@@ -210,12 +279,17 @@ function wrapRun(
       }
     },
     wait: () => sdkCall(() => run.wait()),
-    cancel: () => sdkCall(() => run.cancel()),
+    cancel: () =>
+      sdkCall(async () => {
+        if (readOnly)
+          throw new RelayError(
+            "SDK_LEGACY_STORE_READ_ONLY",
+            "旧运行仅支持读取，不能从新存储连接取消",
+          );
+        await run.cancel();
+      }),
     release() {
-      if (released) return Promise.resolve();
-      released = true;
-      close?.();
-      return Promise.resolve();
+      return (released ??= close());
     },
   };
 }

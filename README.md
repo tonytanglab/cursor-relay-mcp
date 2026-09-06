@@ -6,6 +6,8 @@ A local MCP server built on the official `@cursor/sdk`. It lets MCP clients dele
 
 For a tested Codex Desktop installation workflow on Windows, including personal marketplace layout, CLI fallback, sandbox compatibility, cache refresh, and a Grok 4.6 smoke test, see [CODEX_INSTALL.zh-CN.md](./CODEX_INSTALL.zh-CN.md).
 
+> **Updating another computer:** Pull, build, reinstall, then verify native tools and a real read/write task in a new Codex task. Preserve active runs and local state. See the [upgrade checklist](./CODEX_INSTALL.zh-CN.md#其它电脑升级提醒2026-09-06).
+
 ## Codex built-in MCP contract
 
 The Codex plugin manifest references the packaged MCP declaration with
@@ -67,7 +69,7 @@ an optional alternative for automation, but do not put it in `.mcp.json`, shell
 history, logs, or the repository. When using stored login, omit
 `CURSOR_API_KEY` entirely instead of setting it to an empty string.
 
-The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. The SDK stored login is independent of the Cursor desktop login; after explicit user confirmation, `reauthenticate_cursor` can replace a mismatched SDK login without exposing its API key. Runs are idempotent, persisted, bounded by a total timeout, and recoverable after process restart.
+The normal tool flow is `doctor` → `list_models` → `start_run` → repeated `wait_run` calls until `terminal=true`. The SDK stored login is independent of the Cursor desktop login; after explicit user confirmation, `reauthenticate_cursor` can replace a mismatched SDK login without exposing its API key. Runs are idempotent and persisted; the owning executor enforces its total timeout. New runs use workspace-scoped SQLite, while legacy JSONL remains read-only. Reattaching after a restart observes persisted events; it does not restart execution. Stop unconditional polling when `needsAttention=true`, and do not automatically cancel or resubmit an unknown run.
 
 For `start_run` and `reply_run`, `task` means review/implementation scope and
 acceptance requirements, never file contents. Use `targetLocations` for
