@@ -101,12 +101,19 @@ export function projectRunPanelEvents(
 }
 
 export function runPanelShouldPoll(
-  run: { status: string; execution?: { state: string } } | undefined,
+  run:
+    | {
+        status: string;
+        execution?: { state: string };
+        persistence?: { state: string };
+      }
+    | undefined,
 ): boolean {
   return Boolean(
     run &&
       !["succeeded", "failed", "cancelled"].includes(run.status) &&
-      run.execution?.state !== "unknown",
+      run.execution?.state !== "unknown" &&
+      run.persistence?.state !== "retrying",
   );
 }
 
@@ -762,8 +769,10 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           );
           const status = byId("status");
           status.dataset.status = run ? run.status : "unknown";
-          status.textContent = run && run.execution && run.execution.state === "unknown" ? "执行状态待核实" : run ? STATUS_LABELS[run.status] || run.status : "未知";
-          const errorMessage = state.lastError || (run && run.execution && run.execution.message) || (run && run.error && run.error.message) || "";
+          const persistence = run && run.persistence;
+          status.textContent = persistence ? "状态持久化待恢复" : run && run.execution && run.execution.state === "unknown" ? "执行状态待核实" : run ? STATUS_LABELS[run.status] || run.status : "未知";
+          const persistenceMessage = persistence ? "Relay 本地状态写入或锁清理失败，正在限速恢复；Cursor 可能仍在执行，请勿自动取消或重复提交。" + (persistence.error ? " " + persistence.error.code + ": " + persistence.error.message : "") : "";
+          const errorMessage = state.lastError || persistenceMessage || (run && run.execution && run.execution.message) || (run && run.error && run.error.message) || "";
           byId("errorCard").hidden = !errorMessage;
           text("error", errorMessage);
           if (!run) return;

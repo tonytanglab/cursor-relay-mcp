@@ -1055,10 +1055,26 @@ test("100 concurrent idempotent starts share one SDK launch", async () => {
     );
     assert.equal(item.sdk.launches.length, 1);
     assert.equal(new Set(results.map((result) => result.run.sdkRunId)).size, 1);
-    const run = item.sdk.runs.get(results[0]?.run.sdkRunId ?? "");
-    run?.finish({ status: "finished", result: "once" });
-    await item.service.waitRun(results[0]?.run.relayRunId ?? "", 2_000);
   } finally {
+    // An assertion may fail before a caller receives its run ID. Always drain
+    // the actual fake executors so cleanup cannot mask the original failure.
+    const handles = [...item.sdk.runs.values()];
+    for (const run of handles)
+      run.finish({ status: "finished", result: "once" });
+    const cleanupDeadline = Date.now() + 5_000;
+    for (;;) {
+      const { runs } = await item.service.listRuns();
+      const settled = runs.every(
+        (run) => run.status === "succeeded" && !run.persistence,
+      );
+      const released = handles.every((run) => run.released > 0);
+      if (settled && released) break;
+      assert.ok(
+        Date.now() < cleanupDeadline,
+        "all concurrent fake runs must persist their real terminal result and release before cleanup",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     await rm(item.dir, { recursive: true, force: true });
   }
 });

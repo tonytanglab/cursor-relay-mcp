@@ -235,6 +235,33 @@ for (const local of [false, true]) {
   });
 }
 
+test("local persistence failure is visible without claiming model failure or polling forever", async () => {
+  const app = harness({
+    initial: { run },
+    tool: () => ({
+      run: {
+        ...run,
+        persistence: {
+          state: "retrying",
+          error: { code: "STATE_UPDATE_FAILED", message: "rename EPERM" },
+        },
+      },
+      events: [],
+    }),
+  });
+  try {
+    await flush();
+    assert.equal(app.get("status").textContent, "状态持久化待恢复");
+    assert.match(app.get("error").textContent, /STATE_UPDATE_FAILED/u);
+    assert.match(app.get("error").textContent, /请勿自动取消或重复提交/u);
+    assert.equal(app.get("pulse").dataset.active, "false");
+    await app.fire(2_000);
+    assert.equal(app.calls, 1);
+  } finally {
+    app.close();
+  }
+});
+
 test("running viewer stops when a later snapshot loses its executor", async () => {
   const app = harness({
     initial: { run },

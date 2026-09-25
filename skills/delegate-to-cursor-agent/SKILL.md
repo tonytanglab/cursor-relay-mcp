@@ -18,3 +18,5 @@ description: Delegate a scoped local coding, analysis, review, or testing subtas
 Never place credentials in prompts, tool arguments, idempotency keys, or status reports.
 
 New runs use workspace-scoped SQLite. Legacy JSONL history remains read-only. If a legacy reply or cancellation returns `SDK_LEGACY_STORE_READ_ONLY`, report the migration boundary; do not silently create a new agent that loses conversation context or mutate the old store. An old active process retains its original store until it finishes.
+
+A local `persistence.state=retrying` / `STATE_*` error is not proof that the Cursor executor stopped. Report the structured phase/systemCode/committed fields, retain the original run ID, and do not cancel, reply, or start a replacement solely because progress events stopped. The original process retries the current persistence operation; re-read after local storage recovers. A run is complete only after its true terminal result is persisted and the final answer is consumed.

@@ -65,6 +65,7 @@ export interface RelayRun {
 
 export type RelayRunSummary = Omit<RelayRun, "events"> & {
   eventCount: number;
+  persistence?: RelayPersistenceHealth;
   execution?: {
     state: "unknown";
     observation: "detached";
@@ -75,6 +76,15 @@ export type RelayRunSummary = Omit<RelayRun, "events"> & {
     error: RelayErrorShape;
   };
 };
+
+export interface RelayPersistenceHealth {
+  state: "retrying";
+  operation: string;
+  firstFailureAt: string;
+  lastFailureAt: string;
+  attempts: number;
+  error: RelayErrorShape;
+}
 
 export interface RelayErrorShape {
   code: string;

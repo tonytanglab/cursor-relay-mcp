@@ -92,6 +92,8 @@ try {
     doctorData.capabilities.workspaceReadsSourceDirectly !== true ||
     !("embeddedSourceArgumentsRejected" in doctorData.capabilities) ||
     doctorData.capabilities.embeddedSourceArgumentsRejected !== true ||
+    !("localPersistenceRecovery" in doctorData.capabilities) ||
+    doctorData.capabilities.localPersistenceRecovery !== true ||
     !("activeRunSteering" in doctorData.capabilities) ||
     doctorData.capabilities.activeRunSteering !== false
   )

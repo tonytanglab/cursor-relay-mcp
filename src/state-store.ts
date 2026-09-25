@@ -66,6 +66,40 @@ class RenameFailure extends Error {
   }
 }
 
+/** The mutation was committed; only its owned lock cleanup may be retried. */
+export class StateUpdateCommittedError<T = unknown> extends RelayError {
+  readonly #committedResult: T;
+  readonly #cleanup: () => Promise<void>;
+
+  constructor(
+    result: T,
+    lockPath: string,
+    cause: unknown,
+    cleanup: () => Promise<void>,
+  ) {
+    super("STATE_LOCK_RELEASE_FAILED", `无法释放运行状态锁：${lockPath}`, {
+      retryable: false,
+      details: {
+        systemCode: errorCode(cause),
+        path: lockPath,
+        phase: "release",
+        committed: true,
+      },
+      cause,
+    });
+    this.#committedResult = result;
+    this.#cleanup = cleanup;
+  }
+
+  get committedResult(): T {
+    return this.#committedResult;
+  }
+
+  retryCleanup(): Promise<void> {
+    return this.#cleanup();
+  }
+}
+
 const EMPTY_STATE: PersistedState = {
   schemaVersion: 1,
   runs: {},
@@ -75,6 +109,8 @@ const EMPTY_STATE: PersistedState = {
 export class StateStore {
   readonly path: string;
   private queue: Promise<void> = Promise.resolve();
+  private pendingLock: HeldLock | undefined;
+  private pendingCleanup: Promise<void> | undefined;
   private readonly runtime: StateStoreRuntime;
 
   constructor(stateDir: string, dependencies: StateStoreDependencies = {}) {
@@ -112,7 +148,7 @@ export class StateStore {
     }
     try {
       const parsed: unknown = JSON.parse(text);
-      return structuredClone(parseState(parsed));
+      return parseState(parsed);
     } catch (error) {
       if (error instanceof RelayError && error.code === "STATE_CORRUPT")
         throw error;
@@ -127,6 +163,17 @@ export class StateStore {
     mutator: (state: PersistedState) => T | Promise<T>,
   ): Promise<T> {
     const operation = this.queue.then(async () => {
+      try {
+        await this.cleanupPendingLock();
+      } catch (error) {
+        throw stateFileError(
+          "STATE_LOCK_RELEASE_FAILED",
+          `无法清理上次运行状态锁：${this.path}.lock`,
+          error,
+          `${this.path}.lock`,
+          { phase: "pending-release", committed: false },
+        );
+      }
       const lock = await this.acquireLock();
       let result!: T;
       let failure: unknown;
@@ -142,13 +189,26 @@ export class StateStore {
       try {
         await this.releaseLock(lock);
       } catch (error) {
+        this.pendingLock = lock;
         if (!operationFailed) {
           operationFailed = true;
-          failure = stateFileError(
-            "STATE_LOCK_RELEASE_FAILED",
-            `无法释放运行状态锁：${lock.path}`,
-            error,
+          failure = new StateUpdateCommittedError(
+            result,
             lock.path,
+            error,
+            async () => {
+              try {
+                await this.cleanupPendingLock(lock);
+              } catch (cleanupError) {
+                throw stateFileError(
+                  "STATE_LOCK_RELEASE_FAILED",
+                  `无法释放运行状态锁：${lock.path}`,
+                  cleanupError,
+                  lock.path,
+                  { phase: "release", committed: true },
+                );
+              }
+            },
           );
         }
       }
@@ -162,20 +222,34 @@ export class StateStore {
     return await operation;
   }
 
+  private async cleanupPendingLock(lock = this.pendingLock): Promise<void> {
+    if (!lock || this.pendingLock?.token !== lock.token) return;
+    this.pendingCleanup ??= this.releaseLock(lock)
+      .then(() => {
+        if (this.pendingLock?.token === lock.token)
+          this.pendingLock = undefined;
+      })
+      .finally(() => {
+        this.pendingCleanup = undefined;
+      });
+    await this.pendingCleanup;
+  }
+
   private async write(state: PersistedState): Promise<void> {
     parseState(state);
     const temporary = `${this.path}.${this.runtime.pid}.${this.runtime.randomUUID()}.tmp`;
     let attempts = 0;
+    let phase: "mkdir" | "serialize" | "write" | "rename" = "mkdir";
     try {
       await this.runtime.mkdir(dirname(this.path), { recursive: true });
-      await this.runtime.writeFile(
-        temporary,
-        `${JSON.stringify(state, null, 2)}\n`,
-        {
-          encoding: "utf8",
-          flag: "wx",
-        },
-      );
+      phase = "serialize";
+      const serialized = `${JSON.stringify(state)}\n`;
+      phase = "write";
+      await this.runtime.writeFile(temporary, serialized, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      phase = "rename";
       attempts = await this.replaceWithRetry(temporary);
     } catch (error) {
       if (error instanceof RelayError) throw error;
@@ -191,6 +265,8 @@ export class StateStore {
             systemCode,
             attempts: failure?.attempts ?? attempts,
             path: this.path,
+            phase,
+            committed: false,
           },
           cause: original,
         },
@@ -226,7 +302,18 @@ export class StateStore {
   }
 
   private async acquireLock(): Promise<HeldLock> {
-    await this.runtime.mkdir(dirname(this.path), { recursive: true });
+    const directory = dirname(this.path);
+    try {
+      await this.runtime.mkdir(directory, { recursive: true });
+    } catch (error) {
+      throw stateFileError(
+        "STATE_LOCK_FAILED",
+        `无法创建运行状态目录：${directory}`,
+        error,
+        directory,
+        { phase: "mkdir", committed: false },
+      );
+    }
     const lockPath = `${this.path}.lock`;
     const ownerPath = join(lockPath, "owner.json");
     const startedAt = this.runtime.now();
@@ -405,10 +492,11 @@ function stateFileError(
   message: string,
   cause: unknown,
   path: string,
+  details: Record<string, unknown> = {},
 ): RelayError {
   return new RelayError(code, message, {
     retryable: isTransientFileError(cause),
-    details: { systemCode: errorCode(cause), path },
+    details: { systemCode: errorCode(cause), path, ...details },
     cause,
   });
 }

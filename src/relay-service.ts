@@ -16,6 +16,7 @@ import {
   type CursorRunResult,
   type CursorSdkPort,
 } from "./sdk-port.js";
+import { RunPersistence } from "./run-persistence.js";
 import { StateStore } from "./state-store.js";
 import {
   buildCursorWorkspaceTask,
@@ -29,6 +30,7 @@ import type {
   RelayRun,
   RelayRunSummary,
   RelayRunStatus,
+  RelayPersistenceHealth,
   StartRunInput,
 } from "./types.js";
 
@@ -45,6 +47,7 @@ export class RelayService {
   // Failed observations stay unknown until reattached or a terminal read clears them.
   private readonly detachedRuns = new Set<string>();
   private readonly monitors = new Map<string, Promise<void>>();
+  private readonly persistence = new RunPersistence();
   private readonly launches = new Map<string, Promise<void>>();
   private modelCache: { expiresAt: number; models: CursorModel[] } | undefined;
   private modelRefresh: Promise<CursorModel[]> | undefined;
@@ -87,6 +90,7 @@ export class RelayService {
         embeddedSourceArgumentsRejected: true,
         cursorManagedNetworkAccess: true,
         transientReconnectKeepsRunAlive: true,
+        localPersistenceRecovery: true,
         localExecutionRestartRecovery: false,
         newRunStorage: "workspace-sqlite-v1",
         legacyStorage: "read-only",
@@ -224,9 +228,12 @@ export class RelayService {
       const run = existing.runs[operation.relayRunId];
       if (!run)
         throw new RelayError("STATE_CORRUPT", "幂等索引引用了不存在的运行");
-      await this.ensureAttached(run, normalized.confirmedDangerousPermission);
+      await this.untilPersistenceFailure(
+        run.relayRunId,
+        this.ensureAttached(run, normalized.confirmedDangerousPermission),
+      );
       return {
-        run: summarize(await this.requireRun(run.relayRunId)),
+        run: this.summarize(await this.requireRun(run.relayRunId)),
         idempotentReplay: true,
       };
     }
@@ -294,12 +301,12 @@ export class RelayService {
     });
     if (!reservation.created) {
       const racedRun = await this.requireRun(reservation.relayRunId);
-      await this.ensureAttached(
-        racedRun,
-        normalized.confirmedDangerousPermission,
+      await this.untilPersistenceFailure(
+        racedRun.relayRunId,
+        this.ensureAttached(racedRun, normalized.confirmedDangerousPermission),
       );
       return {
-        run: summarize(await this.requireRun(reservation.relayRunId)),
+        run: this.summarize(await this.requireRun(reservation.relayRunId)),
         idempotentReplay: true,
       };
     }
@@ -309,7 +316,7 @@ export class RelayService {
       input.confirmedDangerousPermission,
     );
     return {
-      run: summarize(await this.requireRun(relayRunId)),
+      run: this.summarize(await this.requireRun(relayRunId)),
       idempotentReplay: false,
     };
   }
@@ -339,8 +346,8 @@ export class RelayService {
 
   async getRun(relayRunId: string): Promise<RelayRunSummary> {
     const run = await this.requireRun(relayRunId);
-    await this.ensureAttached(run);
-    return summarize(
+    await this.untilPersistenceFailure(relayRunId, this.ensureAttached(run));
+    return this.summarize(
       await this.requireRun(relayRunId),
       undefined,
       this.detachedRuns.has(relayRunId),
@@ -348,7 +355,7 @@ export class RelayService {
   }
 
   async getRunSnapshot(relayRunId: string): Promise<RelayRunSummary> {
-    return summarize(
+    return this.summarize(
       await this.requireRun(relayRunId),
       undefined,
       this.detachedRuns.has(relayRunId),
@@ -362,7 +369,7 @@ export class RelayService {
       .filter((event) => event.sequence > afterSequence)
       .slice(-200);
     return {
-      run: summarize(
+      run: this.summarize(
         run,
         undefined,
         this.detachedRuns.has(relayRunId) ||
@@ -380,7 +387,7 @@ export class RelayService {
     const runs = Object.values(state.runs)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.min(Math.max(limit, 1), 200));
-    return { runs: runs.map((run) => summarize(run)) };
+    return { runs: runs.map((run) => this.summarize(run)) };
   }
 
   async readEvents(relayRunId: string, afterSequence = 0, limit = 100) {
@@ -396,6 +403,13 @@ export class RelayService {
       events,
       nextSequence: events.at(-1)?.sequence ?? afterSequence,
       status: run.status,
+      ...(this.persistence.snapshot(relayRunId)
+        ? {
+            persistence: this.persistence.snapshot(relayRunId),
+            needsAttention: true,
+            instruction: PERSISTENCE_FAILURE_MESSAGE,
+          }
+        : {}),
       ...(connectionError
         ? {
             connection: {
@@ -412,33 +426,45 @@ export class RelayService {
     const connectionError =
       await this.ensureAttachedOrConnectionError(existing);
     const run = await this.requireRun(relayRunId);
-    if (TERMINAL.has(run.status)) return waitPayload(run);
+    if (TERMINAL.has(run.status) || this.persistence.snapshot(relayRunId))
+      return this.waitPayload(run);
     if (connectionError) {
       await delay(Math.min(Math.max(waitMs, 0), 1_000));
-      return waitPayload(await this.requireRun(relayRunId), connectionError);
+      return this.waitPayload(
+        await this.requireRun(relayRunId),
+        connectionError,
+      );
     }
     if (this.detachedRuns.has(relayRunId)) {
-      return waitPayload(run, undefined, true);
+      return this.waitPayload(run, undefined, true);
     }
     const monitor = this.monitors.get(relayRunId);
     if (monitor)
-      await Promise.race([
+      await this.untilPersistenceFailure(
+        relayRunId,
         monitor,
-        delay(Math.min(Math.max(waitMs, 0), 30_000)),
-      ]);
+        Math.min(Math.max(waitMs, 0), 30_000),
+      );
     else await delay(Math.min(Math.max(waitMs, 0), 30_000));
-    return waitPayload(await this.requireRun(relayRunId));
+    return this.waitPayload(await this.requireRun(relayRunId));
   }
 
   private async ensureAttachedOrConnectionError(
     run: RelayRun,
   ): Promise<ReturnType<RelayError["toJSON"]> | undefined> {
     try {
-      await this.ensureAttached(run);
+      await this.untilPersistenceFailure(
+        run.relayRunId,
+        this.ensureAttached(run),
+      );
       return undefined;
     } catch (error) {
       const relayError = asRelayError(error, "SDK_RESUME_FAILED");
-      if (!relayError.retryable || Date.now() >= Date.parse(run.deadlineAt)) {
+      if (
+        relayError.code.startsWith("STATE_") ||
+        !relayError.retryable ||
+        Date.now() >= Date.parse(run.deadlineAt)
+      ) {
         throw relayError;
       }
       return relayError.toJSON();
@@ -448,7 +474,7 @@ export class RelayService {
   async cancelRun(relayRunId: string) {
     const run = await this.requireRun(relayRunId);
     if (TERMINAL.has(run.status))
-      return { run: summarize(run), alreadyTerminal: true };
+      return { run: this.summarize(run), alreadyTerminal: true };
     if (run.sdkRunId) {
       const handle = await this.sdk.getRun(run.sdkRunId, run.workspace);
       try {
@@ -456,18 +482,21 @@ export class RelayService {
       } catch (error) {
         const current = await this.requireRun(relayRunId);
         if (TERMINAL.has(current.status))
-          return { run: summarize(current), alreadyTerminal: true };
+          return { run: this.summarize(current), alreadyTerminal: true };
         throw error;
       } finally {
         await handle.release();
       }
     }
-    const applied = await this.patchRun(relayRunId, { status: "cancelled" });
+    const applied = await this.untilPersistenceFailure(
+      relayRunId,
+      this.patchRun(relayRunId, { status: "cancelled" }),
+    );
     const monitor = this.monitors.get(relayRunId);
     if (monitor) await raceWithDeadline(monitor, CANCEL_MONITOR_DRAIN_MS);
     return {
-      run: summarize(await this.requireRun(relayRunId)),
-      alreadyTerminal: !applied,
+      run: this.summarize(await this.requireRun(relayRunId)),
+      alreadyTerminal: applied === false,
     };
   }
 
@@ -491,7 +520,7 @@ export class RelayService {
       handle = run.parentRunId
         ? await this.sdk.reply(run.agentId, cursorTask, launchOptions)
         : await this.sdk.start(cursorTask, launchOptions);
-      const applied = await this.patchRun(
+      const registration = this.patchRun(
         run.relayRunId,
         {
           sdkRunId: handle.id,
@@ -502,17 +531,22 @@ export class RelayService {
         },
         ["starting"],
       );
-      if (!applied) {
-        try {
-          await handle.cancel();
-          if (handle.supports("wait")) await handle.wait();
-        } catch {
-          /* A persisted terminal state remains authoritative. */
-        } finally {
-          if (handle.status !== "running") await handle.release();
-        }
-        return;
-      }
+      // Deadline supervision starts with the SDK handle, not after a local write succeeds.
+      this.attachMonitor(
+        run,
+        handle,
+        registration.then(async (applied) => {
+          if (!applied && handle.status === "running") {
+            try {
+              await handle.cancel();
+              if (handle.supports("wait")) await handle.wait();
+            } catch {
+              /* A persisted terminal state remains authoritative. */
+            }
+          }
+        }),
+      );
+      await registration;
     } catch (error) {
       const relayError = asRelayError(error, "SDK_START_FAILED");
       await this.patchRun(run.relayRunId, {
@@ -521,7 +555,6 @@ export class RelayService {
       });
       throw relayError;
     }
-    this.attachMonitor(run.relayRunId, handle);
   }
 
   private async launchSingleFlight(
@@ -530,33 +563,36 @@ export class RelayService {
     confirmedDangerousPermission = false,
   ): Promise<void> {
     const pending = this.launches.get(run.relayRunId);
-    if (pending) return await pending;
+    if (pending)
+      return await this.untilPersistenceFailure(run.relayRunId, pending);
     const launch = this.launch(
       run,
       idempotencyKey,
       confirmedDangerousPermission,
     ).finally(() => this.launches.delete(run.relayRunId));
     this.launches.set(run.relayRunId, launch);
-    await launch;
+    await this.untilPersistenceFailure(run.relayRunId, launch);
   }
 
   private async ensureAttached(
     run: RelayRun,
     confirmedDangerousPermission = false,
   ) {
-    if (TERMINAL.has(run.status) || this.monitors.has(run.relayRunId)) return;
+    if (TERMINAL.has(run.status) || this.persistence.snapshot(run.relayRunId))
+      return;
     const pendingLaunch = this.launches.get(run.relayRunId);
     if (pendingLaunch) {
-      await pendingLaunch;
+      await this.untilPersistenceFailure(run.relayRunId, pendingLaunch);
       return;
     }
+    if (this.monitors.has(run.relayRunId)) return;
     if (run.sdkRunId) {
       try {
         const handle = await this.sdk.getRun(run.sdkRunId, run.workspace);
         if (Date.now() >= Date.parse(run.deadlineAt)) {
           await this.expire(run, handle);
         } else {
-          this.attachMonitor(run.relayRunId, handle);
+          this.attachMonitor(run, handle);
         }
       } catch (error) {
         const relayError = asRelayError(error, "SDK_RESUME_FAILED");
@@ -596,7 +632,7 @@ export class RelayService {
       if (applied) {
         if (Date.now() >= Date.parse(run.deadlineAt))
           await this.expire(run, recovered);
-        else this.attachMonitor(run.relayRunId, recovered);
+        else this.attachMonitor(run, recovered);
       }
       return;
     }
@@ -616,11 +652,16 @@ export class RelayService {
     );
   }
 
-  private attachMonitor(relayRunId: string, handle: CursorRunHandle) {
+  private attachMonitor(
+    run: RelayRun,
+    handle: CursorRunHandle,
+    ready?: Promise<void>,
+  ) {
+    const relayRunId = run.relayRunId;
     if (this.monitors.has(relayRunId)) return;
     if (handle.executionOwnership === "detached")
       this.detachedRuns.add(relayRunId);
-    const monitor = this.monitor(relayRunId, handle)
+    const monitor = this.monitor(run, handle, ready)
       .then(() => {
         this.detachedRuns.delete(relayRunId);
       })
@@ -648,10 +689,27 @@ export class RelayService {
     this.monitors.set(relayRunId, monitor);
   }
 
-  private async monitor(relayRunId: string, handle: CursorRunHandle) {
-    const run = await this.requireRun(relayRunId);
+  private async monitor(
+    run: RelayRun,
+    handle: CursorRunHandle,
+    ready?: Promise<void>,
+  ) {
+    const relayRunId = run.relayRunId;
     const remaining = Math.max(0, Date.parse(run.deadlineAt) - Date.now());
-    const flow = this.consumeThenWait(relayRunId, handle);
+    let monitorFinished = false;
+    const flow = ready
+      ? ready.then(() => {
+          if (monitorFinished) {
+            const outcome = handle.currentResult();
+            if (outcome) return outcome;
+            throw new RelayError(
+              "MONITOR_CLOSED",
+              "运行监控已结束，不能重新订阅已释放的执行器",
+            );
+          }
+          return this.consumeThenWait(relayRunId, handle);
+        })
+      : this.consumeThenWait(relayRunId, handle);
     try {
       if (handle.executionOwnership === "detached") {
         // An observer cannot enforce the original executor's deadline.
@@ -706,6 +764,7 @@ export class RelayService {
         ["starting", "running"],
       );
     } finally {
+      monitorFinished = true;
       await handle.release();
     }
   }
@@ -718,9 +777,11 @@ export class RelayService {
       try {
         await this.captureEvents(relayRunId, handle);
       } catch (error) {
-        await this.appendEvent(relayRunId, "stream_error", {
-          message: error instanceof Error ? error.message : String(error),
-        });
+        await this.appendEvent(
+          relayRunId,
+          "stream_error",
+          asRelayError(error, "SDK_STREAM_FAILED").toJSON(),
+        );
       }
     }
     if (!handle.supports("wait")) {
@@ -802,24 +863,25 @@ export class RelayService {
   }
 
   private async appendEvent(relayRunId: string, type: string, data: unknown) {
-    const current = await this.requireRun(relayRunId);
-    if (TERMINAL.has(current.status)) return;
     const boundedData = boundEventData(data);
-    await this.store.update((state) => {
-      const run = state.runs[relayRunId];
-      if (!run)
-        throw new RelayError("RUN_NOT_FOUND", `运行不存在：${relayRunId}`);
-      const sequence = (run.events.at(-1)?.sequence ?? 0) + 1;
-      run.events.push({
-        sequence,
-        timestamp: new Date().toISOString(),
-        type,
-        data: boundedData,
-      });
-      if (run.events.length > this.config.maxEventsPerRun)
-        run.events.splice(0, run.events.length - this.config.maxEventsPerRun);
-      run.updatedAt = new Date().toISOString();
-    });
+    await this.persistence.run(relayRunId, "append_event", () =>
+      this.store.update((state) => {
+        const run = state.runs[relayRunId];
+        if (!run)
+          throw new RelayError("RUN_NOT_FOUND", `运行不存在：${relayRunId}`);
+        if (TERMINAL.has(run.status)) return;
+        const sequence = (run.events.at(-1)?.sequence ?? 0) + 1;
+        run.events.push({
+          sequence,
+          timestamp: new Date().toISOString(),
+          type,
+          data: boundedData,
+        });
+        if (run.events.length > this.config.maxEventsPerRun)
+          run.events.splice(0, run.events.length - this.config.maxEventsPerRun);
+        run.updatedAt = new Date().toISOString();
+      }),
+    );
   }
 
   private async expire(run: RelayRun, attached?: CursorRunHandle) {
@@ -832,7 +894,7 @@ export class RelayService {
       }
     }
     if (handle?.executionOwnership === "detached") {
-      this.attachMonitor(run.relayRunId, handle);
+      this.attachMonitor(run, handle);
       return;
     }
     try {
@@ -903,16 +965,19 @@ export class RelayService {
     patch: Partial<RelayRun>,
     expectedStatuses?: RelayRunStatus[],
   ): Promise<boolean> {
-    return await this.store.update((state) => {
-      const run = state.runs[relayRunId];
-      if (!run)
-        throw new RelayError("RUN_NOT_FOUND", `运行不存在：${relayRunId}`);
-      if (expectedStatuses && !expectedStatuses.includes(run.status))
-        return false;
-      if (patch.status !== undefined && TERMINAL.has(run.status)) return false;
-      Object.assign(run, patch, { updatedAt: new Date().toISOString() });
-      return true;
-    });
+    return await this.persistence.run(relayRunId, "update_run", () =>
+      this.store.update((state) => {
+        const run = state.runs[relayRunId];
+        if (!run)
+          throw new RelayError("RUN_NOT_FOUND", `运行不存在：${relayRunId}`);
+        if (expectedStatuses && !expectedStatuses.includes(run.status))
+          return false;
+        if (patch.status !== undefined && TERMINAL.has(run.status))
+          return false;
+        Object.assign(run, patch, { updatedAt: new Date().toISOString() });
+        return true;
+      }),
+    );
   }
 
   private async finishFromOutcome(
@@ -953,6 +1018,57 @@ export class RelayService {
       return false;
     await this.finishFromOutcome(relayRunId, outcome);
     return true;
+  }
+
+  private summarize(
+    run: RelayRun,
+    connectionError?: ReturnType<RelayError["toJSON"]>,
+    detached = false,
+  ): RelayRunSummary {
+    return summarize(
+      run,
+      connectionError,
+      detached,
+      this.persistence.snapshot(run.relayRunId),
+    );
+  }
+
+  private waitPayload(
+    run: RelayRun,
+    connectionError?: ReturnType<RelayError["toJSON"]>,
+    detached = false,
+  ) {
+    return waitPayload(
+      run,
+      connectionError,
+      detached,
+      this.persistence.snapshot(run.relayRunId),
+    );
+  }
+
+  private async untilPersistenceFailure<T>(
+    relayRunId: string,
+    operation: Promise<T>,
+    timeoutMs?: number,
+  ): Promise<T | undefined> {
+    const failure = this.persistence.waitForFailure(relayRunId);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        failure.promise.then(() => undefined),
+        ...(timeoutMs === undefined
+          ? []
+          : [
+              new Promise<undefined>((resolve) => {
+                timer = setTimeout(() => resolve(undefined), timeoutMs);
+              }),
+            ]),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      failure.dispose();
+    }
   }
 
   private async requireRun(relayRunId: string): Promise<RelayRun> {
@@ -1099,15 +1215,22 @@ function waitPayload(
   run: RelayRun,
   connectionError?: ReturnType<RelayError["toJSON"]>,
   detached = false,
+  persistence?: RelayPersistenceHealth,
 ) {
-  const terminal = TERMINAL.has(run.status);
-  const needsAttention = !terminal && detached;
+  const terminal = TERMINAL.has(run.status) && !persistence;
+  const needsAttention = Boolean(persistence) || (!terminal && detached);
   return {
-    run: summarize(run, connectionError, detached),
+    run: summarize(run, connectionError, detached, persistence),
     terminal,
     needsAttention,
     mustCallAgain: !terminal && !needsAttention,
-    ...(needsAttention ? { instruction: DETACHED_EXECUTION_MESSAGE } : {}),
+    ...(needsAttention
+      ? {
+          instruction: persistence
+            ? PERSISTENCE_FAILURE_MESSAGE
+            : DETACHED_EXECUTION_MESSAGE,
+        }
+      : {}),
     ...(terminal || needsAttention
       ? {}
       : {
@@ -1314,10 +1437,12 @@ function summarize(
   run: RelayRun,
   connectionError?: ReturnType<RelayError["toJSON"]>,
   detached = false,
+  persistence?: RelayPersistenceHealth,
 ): RelayRunSummary {
   const { events, ...summary } = run;
   return {
     ...summary,
+    ...(persistence ? { persistence } : {}),
     eventCount: events.length,
     ...(detached && !TERMINAL.has(run.status)
       ? {
@@ -1338,6 +1463,9 @@ function summarize(
       : {}),
   };
 }
+
+const PERSISTENCE_FAILURE_MESSAGE =
+  "本地运行状态持久化失败，插件正在重试本地保存；Cursor 可能仍在执行，不能据此认定失联。请修复本地存储后再读取，勿因该错误取消、重发或重新分配任务。终态保存完成前不视为任务完成。";
 
 const DETACHED_EXECUTION_MESSAGE =
   "当前仅观察本地持久事件，无法确认原执行器是否仍存活；事件回放不代表模型恢复。停止无条件轮询并交回主任务诊断原执行器，勿自动重启、取消或重复计费。其它进程仍可能在执行，未将运行判为失败；可显式再次读取最终状态。";

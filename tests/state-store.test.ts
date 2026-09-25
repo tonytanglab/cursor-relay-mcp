@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RelayError } from "../src/errors.js";
-import { StateStore } from "../src/state-store.js";
+import { StateStore, StateUpdateCommittedError } from "../src/state-store.js";
 import type { PersistedState } from "../src/types.js";
 
 function addRun(state: PersistedState, relayRunId: string, workspace: string) {
@@ -214,6 +214,8 @@ test("permanent Windows EPERM is bounded, cleans temp, and does not poison the q
           systemCode: "EPERM",
           attempts: 7,
           path: store.path,
+          phase: "rename",
+          committed: false,
         });
         return true;
       },
@@ -434,6 +436,231 @@ test("read EPERM is a retryable I/O failure rather than state corruption", async
       });
       return true;
     });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("compact UTF-8 state preserves history and separate reads own their nested data", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cursor-relay-state-"));
+  try {
+    const store = new StateStore(dir);
+    await store.update((state) => {
+      addRun(state, "history", dir);
+      state.runs.history?.events.push({
+        sequence: 1,
+        timestamp: new Date().toISOString(),
+        type: "旧记录",
+        data: { nested: ["中文与 emoji 🚀", { retained: true }] },
+      });
+    });
+    const before = await store.read();
+    const other = await store.read();
+    (other.runs.history?.events[0]?.data as { nested: unknown[] }).nested.push(
+      "local mutation",
+    );
+    assert.deepEqual(await store.read(), before);
+    await store.update(() => undefined);
+    assert.deepEqual(await store.read(), before);
+    const serialized = await readFile(store.path, "utf8");
+    assert.notEqual(serialized.charCodeAt(0), 0xfeff);
+    assert.equal(serialized, `${JSON.stringify(before)}\n`);
+    assert.deepEqual(JSON.parse(serialized), before);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+for (const code of ["EACCES", "ENOSPC"] as const) {
+  test(`lock directory creation ${code} is structured before any mutation or write`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cursor-relay-state-"));
+    try {
+      const original = systemError(code);
+      let mutations = 0;
+      let writes = 0;
+      const store = new StateStore(dir, {
+        mkdir: async () => {
+          throw original;
+        },
+        writeFile: async () => {
+          writes += 1;
+        },
+      });
+      await assert.rejects(
+        store.update((state) => {
+          mutations += 1;
+          addRun(state, "must-not-start", dir);
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof RelayError);
+          assert.equal(error.code, "STATE_LOCK_FAILED");
+          assert.equal(error.cause, original);
+          assert.equal(error.retryable, code === "EACCES");
+          assert.deepEqual(error.details, {
+            systemCode: code,
+            path: dir,
+            phase: "mkdir",
+            committed: false,
+          });
+          return true;
+        },
+      );
+      assert.equal(mutations, 0);
+      assert.equal(writes, 0);
+      assert.deepEqual(await readdir(dir), []);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const phase of ["mkdir", "write"] as const) {
+  test(`state write reports the failing ${phase} phase without committing`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cursor-relay-state-"));
+    try {
+      let parentMkdirCalls = 0;
+      const store = new StateStore(dir, {
+        mkdir: new Proxy(mkdir, {
+          apply: (_target, _receiver, args: Parameters<typeof mkdir>) => {
+            if (args[0] === dir) {
+              parentMkdirCalls += 1;
+              if (phase === "mkdir" && parentMkdirCalls === 2)
+                throw systemError("EACCES");
+            }
+            return mkdir(...args);
+          },
+        }),
+        writeFile: async (...args) => {
+          if (
+            phase === "write" &&
+            typeof args[0] === "string" &&
+            args[0].endsWith(".tmp")
+          )
+            throw systemError("ENOSPC");
+          return writeFile(...args);
+        },
+      });
+      await assert.rejects(
+        store.update((state) => addRun(state, "failed", dir)),
+        (error: unknown) => {
+          assert.ok(error instanceof RelayError);
+          assert.equal(error.code, "STATE_UPDATE_FAILED");
+          assert.deepEqual(error.details, {
+            systemCode: phase === "mkdir" ? "EACCES" : "ENOSPC",
+            attempts: 0,
+            path: store.path,
+            phase,
+            committed: false,
+          });
+          return true;
+        },
+      );
+      assert.deepEqual((await store.read()).runs, {});
+      await assertNoTemporaryFiles(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("committed cleanup retries preserve the original result without replaying mutation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cursor-relay-state-"));
+  try {
+    let cleanupFailures = 2;
+    let mutations = 0;
+    const result = { marker: "private-mutation-result" };
+    const store = new StateStore(dir, {
+      rm: async (...args) => {
+        if (String(args[0]).endsWith(".lock") && cleanupFailures-- > 0)
+          throw systemError("EPERM");
+        return rm(...args);
+      },
+    });
+    let committed: StateUpdateCommittedError | undefined;
+    await assert.rejects(
+      store.update((state) => {
+        mutations += 1;
+        addRun(state, "committed", dir);
+        return result;
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof StateUpdateCommittedError);
+        committed = error;
+        assert.equal(error.retryable, false);
+        assert.equal(error.committedResult, result);
+        assert.equal(JSON.stringify(error).includes(result.marker), false);
+        assert.deepEqual(error.details, {
+          systemCode: "EPERM",
+          path: `${store.path}.lock`,
+          phase: "release",
+          committed: true,
+        });
+        return true;
+      },
+    );
+    assert.ok(committed);
+    assert.ok((await store.read()).runs.committed);
+    await assert.rejects(committed.retryCleanup(), (error: unknown) => {
+      assert.ok(error instanceof RelayError);
+      assert.equal(error.code, "STATE_LOCK_RELEASE_FAILED");
+      assert.equal(error.retryable, true);
+      assert.equal((error.details as { committed: boolean }).committed, true);
+      return true;
+    });
+    await Promise.all([committed.retryCleanup(), committed.retryCleanup()]);
+    await committed.retryCleanup();
+    assert.equal(mutations, 1);
+    assert.equal(committed.committedResult, result);
+    await assert.rejects(readdir(`${store.path}.lock`), { code: "ENOENT" });
+    await store.update((state) => addRun(state, "later", dir));
+    assert.deepEqual(Object.keys((await store.read()).runs).sort(), [
+      "committed",
+      "later",
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("new updates clear a pending owned lock before entering a new mutation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cursor-relay-state-"));
+  try {
+    let cleanupFailures = 2;
+    let laterMutations = 0;
+    const store = new StateStore(dir, {
+      rm: async (...args) => {
+        if (String(args[0]).endsWith(".lock") && cleanupFailures-- > 0)
+          throw systemError("EPERM");
+        return rm(...args);
+      },
+    });
+    await assert.rejects(
+      store.update((state) => addRun(state, "first", dir)),
+      StateUpdateCommittedError,
+    );
+    const later = (state: PersistedState) => {
+      laterMutations += 1;
+      addRun(state, "second", dir);
+    };
+    await assert.rejects(store.update(later), (error: unknown) => {
+      assert.ok(error instanceof RelayError);
+      assert.equal(error instanceof StateUpdateCommittedError, false);
+      assert.equal(error.code, "STATE_LOCK_RELEASE_FAILED");
+      assert.deepEqual(error.details, {
+        systemCode: "EPERM",
+        path: `${store.path}.lock`,
+        phase: "pending-release",
+        committed: false,
+      });
+      return true;
+    });
+    assert.equal(laterMutations, 0);
+    await store.update(later);
+    assert.equal(laterMutations, 1);
+    assert.deepEqual(Object.keys((await store.read()).runs).sort(), [
+      "first",
+      "second",
+    ]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

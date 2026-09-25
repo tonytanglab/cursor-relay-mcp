@@ -2,9 +2,9 @@
 
 本文用于在一台新的 Windows 电脑上，把 `cursor-relay-mcp` 安装为 Codex 个人插件，并完成一次真实 Cursor 模型调用。内容基于 2026-08-26 的本机实测；Codex 内部 CLI 路径可能随桌面版升级变化，因此优先使用系统可执行的 `codex` 命令，只在它被 WindowsApps 拒绝时使用文中的备用路径。
 
-## 其它电脑升级提醒（2026-09-06）
+## 其它电脑升级提醒（2026-09-25）
 
-本次更新包含工作区 SQLite 存储、未知执行状态保护，以及本机进度链接。仅拉取 Git 不会更新已安装插件；旧任务也不能作为新版本验收依据。
+本次更新包含本地状态写入失败恢复，以及此前的工作区 SQLite 存储、未知执行状态保护和本机进度链接。发布缓存版本为 `0.1.1+codex.20260925023100`。仅拉取 Git 不会更新已安装插件；旧任务也不能作为新版本验收依据。
 
 1. 先让本机正在执行的 Cursor 子任务收尾；保留 runId、原登录和状态目录。不要为了升级取消运行或删除旧缓存、JSONL、checkpoint、SQLite。
 2. 在本机实际插件源目录确认工作树改动来源后执行下列命令；有本地改动或非快进冲突时先合并，不强制覆盖。构建和依赖不会随 Git 推送。
@@ -20,7 +20,7 @@
    ```
 
 3. 确认 personal marketplace 指向本机源目录，installed/enabled 且缓存 manifest 版本与源目录一致；非 personal 安装使用本机实际 marketplace 名称。不要复制开发机绝对路径，也不要重复注册同名 MCP。自行修改源码后，按本文 cachebuster 流程更新版本再重装。
-4. 在新建的 Codex 任务中发现并调用原生 `doctor`、`list_models`。`doctor.capabilities` 必须包含 `newRunStorage=workspace-sqlite-v1`、`legacyStorage=read-only`、`localExecutionRestartRecovery=false`、`localProgressLinks=true`。工具缺失时记录缺少的工具、安装版本及配置位置；先核对启用和加载状态，必要时在任务收尾后重开 Codex。不能凭 Skill 可见或文件存在声称 MCP 可用，也不要用临时 shell RPC 替代验收。
+4. 在新建的 Codex 任务中发现并调用原生 `doctor`、`list_models`。`doctor.capabilities` 必须包含 `localPersistenceRecovery=true`、`newRunStorage=workspace-sqlite-v1`、`legacyStorage=read-only`、`localExecutionRestartRecovery=false`、`localProgressLinks=true`。工具缺失时记录缺少的工具、安装版本及配置位置；先核对启用和加载状态，必要时在任务收尾后重开 Codex。不能凭 Skill 可见或文件存在声称 MCP 可用，也不要用临时 shell RPC 替代验收。
 5. 先确认目标工作区和真实模型调用授权。白名单外通过 `authorize_workspace` 签发本对话精确路径权限；模型和参数取自 `list_models`。只读测试使用 `read-only`，读写测试使用 `workspace-write`，仅创建事先指定的临时文件；提示只传路径与范围。持续原生 `wait_run` 至终态、消费最终答复，并独立核对写入及读回结果。
 6. `needsAttention=true` 或 `execution.state=unknown` 时停止自动轮询，核实原执行器；即使期限已过，也不自动取消或把未知运行判为失败。已有 runId 不得因界面或连接问题重复提交。进度沙箱失败时调用 `open_run` 获取本机链接；此链接不应分享给其它电脑。
 
@@ -461,6 +461,18 @@ MCP App `Transport closed` 避坑：
 - 新运行使用 SDK 公开 SQLite 存储，位于配置状态目录的 `cursor-sdk-sqlite-v1/<工作区路径哈希>/`，避免旧 JSONL 每个流片段全量读写历史。存储由适配器租约持有，最后一个运行/观察句柄释放后关闭；关闭 MCP 时拒绝新租用，活跃句柄正常收尾。
 - 原 `cursor-sdk` JSONL 与 checkpoint 保留为只读历史，不做自动迁移。旧会话 `reply_run` 和取消操作返回 `SDK_LEGACY_STORE_READ_ONLY`；不得静默新建无上下文会话替代，也不能把升级前仍在执行的实例改为新存储。插件回滚时保留新 SQLite 子目录，否则会丢失升级后历史。
 - 若新任务也失败，再查 Codex 日志中该任务的 `mcp_server_startup_status_updated`。曾出现 `ready` 后才变为 `Transport closed` 与从未达到 `ready` 是两类问题，前者查生命周期/重载，后者查启动命令、Node.js、构建和缓存。
+
+### 状态文件写入错误后没有新事件，但仍显示 running
+
+这是本地 Relay 持久层错误，不能单凭该提示认定 Cursor 已退出。2026-09-25 的实际记录显示：Relay 停止事件投影后，Cursor SDK SQLite 仍有事件追加。旧实现将本地写盘异常误归类为 `stream_error`，退出事件订阅；若错误记录或终态保存再次失败，也无法把状态准确交给调用者。此前只将 SDK 历史改为 SQLite，没有消除 Relay 汇总 JSON 的故障边界。
+
+新版 `doctor.capabilities.localPersistenceRecovery=true` 表示本地持久化恢复已加载。`persistence.state=retrying` 时：
+
+- 同一执行器继续受监控，当前事件或终态写入按有上限的退避间隔重试；Relay不追加无界内存队列，不自动重新计费。`needsAttention=true` 要求主任务停止无条件轮询并检查本地存储，不等于取消或执行失败。
+- 查看 `persistence.error.code/details` 的 `phase`、`systemCode`、`committed`，以及MCP stderr中的 `relay_persistence_error`。区分临时文件写入、原子替换与锁清理；不要仅凭文件路径归咎于杀毒软件或Cursor。
+- 数据已提交但锁清理失败时只重试原锁清理，不能重放追加。终态尚未保存或锁清理未恢复时，不把任务报告为完成。
+- 存储恢复后用原runId显式读取结果，核对实际文件。不要因 `running` 加事件停滞就自动cancel/reply/另开替代任务。SDK缓冲溢出是另一个明确的流错误，必须披露可能的进度事件缺口。
+- 先核对已安装版本与源版本一致。仅push/pull不会更新本机插件；旧连接仍运行旧代码。不要在另一任务仍执行时重启其MCP进程，不要清空状态目录或迁移正在使用的日志。
 
 ## 三分钟验收清单
 
