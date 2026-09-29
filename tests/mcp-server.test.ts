@@ -123,7 +123,7 @@ test("MCP exposes a read-only live run panel backed by real status tools", async
     },
   } as unknown as RelayService;
   const server = createMcpServer(service);
-  const client = new Client({ name: "panel-test", version: "0.1.1" });
+  const client = new Client({ name: "panel-test", version: "0.1.2" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
 

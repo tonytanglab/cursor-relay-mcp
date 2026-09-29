@@ -272,6 +272,73 @@ test("progress snapshots are bounded and never touch SDK or mutate expired state
   }
 });
 
+test("owned run with no SDK events for ten minutes requests attention without cancelling", async () => {
+  const item = await fixture();
+  try {
+    const started = await item.service.startRun({
+      workspace: item.dir,
+      task: "long running task",
+      model: { id: "cursor-test" },
+      idempotencyKey: "silent-owned-run",
+    });
+    const relayRunId = started.run.relayRunId;
+    const handle = item.sdk.runs.get(started.run.sdkRunId ?? "");
+    assert.ok(handle);
+    const eventDeadline = Date.now() + 2_000;
+    while (
+      !(await item.store.read()).runs[relayRunId]?.events.length &&
+      Date.now() < eventDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const oldTimestamp = new Date(Date.now() - 11 * 60_000).toISOString();
+    await item.store.update((state) => {
+      const event = state.runs[relayRunId]?.events.at(-1);
+      assert.ok(event);
+      event.timestamp = oldTimestamp;
+    });
+    const waiting = await item.service.waitRun(relayRunId, 0);
+    assert.equal(waiting.run.status, "running");
+    assert.equal(waiting.run.activity?.state, "silent");
+    assert.equal(waiting.run.activity.lastEventAt, oldTimestamp);
+    assert.equal(waiting.needsAttention, true);
+    assert.equal(waiting.mustCallAgain, false);
+    assert.match(waiting.instruction ?? "", /无法据此确认执行器/u);
+    assert.equal(handle.cancelled, false);
+    assert.equal(item.sdk.launches.length, 1);
+
+    const events = await item.service.readEvents(relayRunId);
+    assert.equal(events.needsAttention, true);
+    assert.equal(events.activity?.state, "silent");
+    const snapshot = await item.service.getRunProgressSnapshot(relayRunId);
+    assert.equal(snapshot.run.activity?.state, "silent");
+
+    handle.finish({ status: "finished", result: "actual result" });
+    let done = await item.service.waitRun(relayRunId, 0);
+    const terminalDeadline = Date.now() + 2_000;
+    while (!done.terminal && Date.now() < terminalDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      done = await item.service.waitRun(relayRunId, 0);
+    }
+    assert.equal(done.terminal, true);
+    assert.equal(done.needsAttention, false);
+    assert.equal(done.run.activity, undefined);
+    assert.equal(done.run.assistantText, "actual result");
+    const releaseDeadline = Date.now() + 2_000;
+    while (handle.released === 0 && Date.now() < releaseDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(handle.released, 1);
+  } finally {
+    await rm(item.dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 50,
+    });
+  }
+});
+
 test("model validation, permission mapping, idempotency and wait contract", async () => {
   const item = await fixture();
   try {

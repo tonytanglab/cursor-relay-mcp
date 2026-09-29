@@ -73,7 +73,7 @@ const targetLocationsSchema = z
   );
 
 export function createMcpServer(service: RelayService): McpServer {
-  const server = new McpServer({ name: "cursor-relay-mcp", version: "0.1.1" });
+  const server = new McpServer({ name: "cursor-relay-mcp", version: "0.1.2" });
   const progress = new RunProgressServer(service);
   server.server.onclose = () => {
     void progress.close();

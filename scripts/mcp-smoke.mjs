@@ -11,7 +11,7 @@ const transport = new StdioClientTransport({
   env: { ...process.env, CURSOR_API_KEY: "", CURSOR_RELAY_STATE_DIR: stateDir },
   stderr: "pipe",
 });
-const client = new Client({ name: "cursor-relay-smoke", version: "0.1.1" });
+const client = new Client({ name: "cursor-relay-smoke", version: "0.1.2" });
 try {
   await client.connect(transport);
   const tools = await client.listTools();
@@ -94,6 +94,7 @@ try {
     doctorData.capabilities.embeddedSourceArgumentsRejected !== true ||
     !("localPersistenceRecovery" in doctorData.capabilities) ||
     doctorData.capabilities.localPersistenceRecovery !== true ||
+    doctorData.capabilities.silentRunAttentionMs !== 600_000 ||
     !("activeRunSteering" in doctorData.capabilities) ||
     doctorData.capabilities.activeRunSteering !== false
   )

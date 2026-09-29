@@ -65,6 +65,13 @@ export interface RelayRun {
 
 export type RelayRunSummary = Omit<RelayRun, "events"> & {
   eventCount: number;
+  activity?: {
+    state: "silent";
+    lastEventAt: string;
+    silentForMs: number;
+    thresholdMs: number;
+    message: string;
+  };
   persistence?: RelayPersistenceHealth;
   execution?: {
     state: "unknown";

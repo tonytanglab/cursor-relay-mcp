@@ -153,6 +153,8 @@ Codex 插件不是把 MCP 配置复制进用户 `config.toml`。插件 manifest 
 
 `doctor` 会返回实际生效的 `defaultTimeoutMs` 与 `maxTimeoutMs`。普通仓库任务必须省略 `timeoutMs`，使用默认 24 小时总预算；只有用户或任务确实要求更短预算时才显式传入，任何运行都不能超过 24 小时硬上限。单次 `wait_run` 超时只是轮询切片；可重试的 SDK 重连异常会返回 `connection.state=reconnecting` 并保持运行非终态。只要运行状态与事件持续正常推进，就应在总预算内继续等待，不应因已等待 10 分钟、2 小时或 4 小时而取消或拆成多个短续接运行；真正达到 24 小时总预算才是执行超时，不代表任务推理在语义上失败。
 
+连续 10 分钟没有新事件时，`wait_run` 返回 `needsAttention=true`、`mustCallAgain=false`，并在 `run.activity` 给出最后事件时间和静默时长；运行仍为非终态。此时停止无条件轮询，核查原运行及外部进程。静默本身不能证明 SDK 执行器已退出，不得因此自动取消或重新提交计费任务。本机进度页会显示“长时间无事件，待核实”，并继续刷新只读快照，以便展示后续事件或终态。
+
 锁定的公开 Cursor SDK 当前没有向正在执行的本地 Agent run 注入新指令的操作；`doctor.capabilities.activeRunSteering` 因此明确为 `false`。Relay 不会把内部事件追加伪装成“纠偏指令已送达”。调用方也不应仅为调整方向就取消活动运行：应继续观察至终态，再用 `reply_run` 续接；只有用户明确要求停止，或继续执行将跨越具体安全边界时才取消。
 
 Cursor SDK stored login 与 Cursor 桌面端登录彼此独立。若 `doctor.authentication=stored-login` 但 `list_models` 返回 `CURSOR_ACCOUNT_PLAN_REQUIRED`，先核对 `doctor.authenticationEmail`；只有用户明确同意替换 SDK 登录时才调用 `reauthenticate_cursor`（参数 `confirmed=true`），完成后必须重新运行 `doctor` 与 `list_models`。重新登录成功本身不等于套餐权限已经验证。

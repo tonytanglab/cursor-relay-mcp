@@ -1,6 +1,6 @@
 {
   "name": "cursor-relay-mcp",
-  "version": "0.1.1+codex.20260925023100",
+  "version": "0.1.2+codex.20260929054958",
   "description": "Durable, model-selected Cursor Agent delegation through MCP.",
   "author": {
     "name": "cursor-relay-mcp contributors"

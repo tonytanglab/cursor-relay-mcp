@@ -42,6 +42,7 @@ const DEADLINE_GRACE_MS = 500;
 const CANCEL_SETTLE_MS = 10_000;
 const CANCEL_REQUEST_GRACE_MS = 1_000;
 const CANCEL_MONITOR_DRAIN_MS = 250;
+const EVENT_SILENCE_THRESHOLD_MS = 10 * 60_000;
 
 export class RelayService {
   // Failed observations stay unknown until reattached or a terminal read clears them.
@@ -91,6 +92,7 @@ export class RelayService {
         cursorManagedNetworkAccess: true,
         transientReconnectKeepsRunAlive: true,
         localPersistenceRecovery: true,
+        silentRunAttentionMs: EVENT_SILENCE_THRESHOLD_MS,
         localExecutionRestartRecovery: false,
         newRunStorage: "workspace-sqlite-v1",
         legacyStorage: "read-only",
@@ -395,6 +397,7 @@ export class RelayService {
     const connectionError =
       await this.ensureAttachedOrConnectionError(existing);
     const run = await this.requireRun(relayRunId);
+    const activity = silentActivity(run);
     const events = run.events
       .filter((event) => event.sequence > afterSequence)
       .slice(0, Math.min(Math.max(limit, 1), 500));
@@ -403,6 +406,13 @@ export class RelayService {
       events,
       nextSequence: events.at(-1)?.sequence ?? afterSequence,
       status: run.status,
+      ...(activity
+        ? {
+            activity,
+            needsAttention: true,
+            instruction: activity.message,
+          }
+        : {}),
       ...(this.persistence.snapshot(relayRunId)
         ? {
             persistence: this.persistence.snapshot(relayRunId),
@@ -426,7 +436,11 @@ export class RelayService {
     const connectionError =
       await this.ensureAttachedOrConnectionError(existing);
     const run = await this.requireRun(relayRunId);
-    if (TERMINAL.has(run.status) || this.persistence.snapshot(relayRunId))
+    if (
+      TERMINAL.has(run.status) ||
+      this.persistence.snapshot(relayRunId) ||
+      silentActivity(run)
+    )
       return this.waitPayload(run);
     if (connectionError) {
       await delay(Math.min(Math.max(waitMs, 0), 1_000));
@@ -1218,7 +1232,9 @@ function waitPayload(
   persistence?: RelayPersistenceHealth,
 ) {
   const terminal = TERMINAL.has(run.status) && !persistence;
-  const needsAttention = Boolean(persistence) || (!terminal && detached);
+  const activity = silentActivity(run);
+  const needsAttention =
+    Boolean(persistence) || (!terminal && (detached || Boolean(activity)));
   return {
     run: summarize(run, connectionError, detached, persistence),
     terminal,
@@ -1228,7 +1244,9 @@ function waitPayload(
       ? {
           instruction: persistence
             ? PERSISTENCE_FAILURE_MESSAGE
-            : DETACHED_EXECUTION_MESSAGE,
+            : detached
+              ? DETACHED_EXECUTION_MESSAGE
+              : activity?.message,
         }
       : {}),
     ...(terminal || needsAttention
@@ -1440,9 +1458,11 @@ function summarize(
   persistence?: RelayPersistenceHealth,
 ): RelayRunSummary {
   const { events, ...summary } = run;
+  const activity = silentActivity(run);
   return {
     ...summary,
     ...(persistence ? { persistence } : {}),
+    ...(activity ? { activity } : {}),
     eventCount: events.length,
     ...(detached && !TERMINAL.has(run.status)
       ? {
@@ -1469,6 +1489,25 @@ const PERSISTENCE_FAILURE_MESSAGE =
 
 const DETACHED_EXECUTION_MESSAGE =
   "当前仅观察本地持久事件，无法确认原执行器是否仍存活；事件回放不代表模型恢复。停止无条件轮询并交回主任务诊断原执行器，勿自动重启、取消或重复计费。其它进程仍可能在执行，未将运行判为失败；可显式再次读取最终状态。";
+
+const SILENT_ACTIVITY_MESSAGE =
+  "Cursor SDK 已超过 10 分钟没有新事件；RUNNING 仅是上次记录的状态，无法据此确认执行器仍在推进。请核查原运行与外部进程，停止无条件轮询；勿仅因静默自动取消或重复提交。可用原 relayRunId 再次读取终态。";
+
+function silentActivity(run: RelayRun, now = Date.now()) {
+  if (TERMINAL.has(run.status)) return undefined;
+  const lastEventAt = run.events.at(-1)?.timestamp ?? run.createdAt;
+  const lastEventMs = Date.parse(lastEventAt);
+  if (!Number.isFinite(lastEventMs)) return undefined;
+  const silentForMs = Math.max(0, now - lastEventMs);
+  if (silentForMs < EVENT_SILENCE_THRESHOLD_MS) return undefined;
+  return {
+    state: "silent" as const,
+    lastEventAt,
+    silentForMs,
+    thresholdMs: EVENT_SILENCE_THRESHOLD_MS,
+    message: SILENT_ACTIVITY_MESSAGE,
+  };
+}
 
 function outcomeMetadata(outcome: CursorRunResult): Partial<RelayRun> {
   return {

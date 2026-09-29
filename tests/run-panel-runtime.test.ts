@@ -235,6 +235,35 @@ for (const local of [false, true]) {
   });
 }
 
+test("silent running status is visible while the viewer keeps checking for recovery", async () => {
+  const silentRun = {
+    ...run,
+    activity: {
+      state: "silent",
+      message: "Cursor SDK 已超过 10 分钟没有新事件",
+    },
+  };
+  const app = harness({
+    initial: { run: silentRun },
+    tool: (call) => ({
+      run: call === 1 ? silentRun : run,
+      events: [],
+    }),
+  });
+  try {
+    await flush();
+    assert.equal(app.get("status").textContent, "长时间无事件，待核实");
+    assert.match(app.get("error").textContent, /超过 10 分钟/u);
+    assert.equal(app.get("pulse").dataset.active, "true");
+    await app.fire(2_000);
+    assert.equal(app.calls, 2);
+    assert.equal(app.get("status").textContent, "运行中");
+    assert.equal(app.get("errorCard").hidden, true);
+  } finally {
+    app.close();
+  }
+});
+
 test("local persistence failure is visible without claiming model failure or polling forever", async () => {
   const app = harness({
     initial: { run },

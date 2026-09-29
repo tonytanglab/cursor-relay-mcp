@@ -762,7 +762,9 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
               : state.reconnecting
               ? "Cursor SDK 暂时不可达，正在自动重连"
               : active
-                ? "正在刷新只读进度快照"
+                ? run && run.activity && run.activity.state === "silent"
+                  ? "长时间无新事件；正在刷新只读快照"
+                  : "正在刷新只读进度快照"
                 : run
                   ? "实时读取已停止"
                   : "等待运行数据",
@@ -770,9 +772,9 @@ export const RUN_PANEL_HTML = String.raw`<!doctype html>
           const status = byId("status");
           status.dataset.status = run ? run.status : "unknown";
           const persistence = run && run.persistence;
-          status.textContent = persistence ? "状态持久化待恢复" : run && run.execution && run.execution.state === "unknown" ? "执行状态待核实" : run ? STATUS_LABELS[run.status] || run.status : "未知";
+          status.textContent = persistence ? "状态持久化待恢复" : run && run.execution && run.execution.state === "unknown" ? "执行状态待核实" : run && run.activity && run.activity.state === "silent" ? "长时间无事件，待核实" : run ? STATUS_LABELS[run.status] || run.status : "未知";
           const persistenceMessage = persistence ? "Relay 本地状态写入或锁清理失败，正在限速恢复；Cursor 可能仍在执行，请勿自动取消或重复提交。" + (persistence.error ? " " + persistence.error.code + ": " + persistence.error.message : "") : "";
-          const errorMessage = state.lastError || persistenceMessage || (run && run.execution && run.execution.message) || (run && run.error && run.error.message) || "";
+          const errorMessage = state.lastError || persistenceMessage || (run && run.execution && run.execution.message) || (run && run.activity && run.activity.message) || (run && run.error && run.error.message) || "";
           byId("errorCard").hidden = !errorMessage;
           text("error", errorMessage);
           if (!run) return;

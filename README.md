@@ -86,6 +86,13 @@ explicit budget when appropriate, but cannot raise a run above 24 hours. A
 `connection.state=reconnecting` and remain non-terminal.
 While status and events show healthy progress, callers should keep waiting within
 the run budget instead of cancelling or creating short continuation runs.
+If no event is persisted for 10 minutes, `wait_run` returns `needsAttention=true`
+and `mustCallAgain=false`; the run remains non-terminal. The response includes
+`run.activity` with the last event time and silence duration. Check the original
+run and any external process before taking action. Silence alone does not prove
+that the SDK executor stopped, and must not trigger automatic cancellation or
+a replacement paid run. The progress page shows the warning while continuing
+to refresh snapshots so later activity or a terminal result remains visible.
 
 After `start_run` or `reply_run`, call `open_run` and share its clickable
 `progressUrl`. This read-only loopback page bypasses MCP App sandbox failures.
